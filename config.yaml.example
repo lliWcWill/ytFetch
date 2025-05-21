@@ -1,0 +1,5 @@
+groq:
+  api_key: "your key"
+
+openai:
+  api_key: "your key"
