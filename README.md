@@ -14,6 +14,10 @@ ytFetch is a comprehensive toolkit for extracting YouTube video transcripts and 
 - **Organized Output**: Saves files to `video_outputs/` directory
 
 #### Web Interface (`appStreamlit.py`) 🆕
+
+![Peek 2025-05-29 17-15](https://github.com/user-attachments/assets/0a7e36d8-af5c-4903-a731-899f22d06433)
+
+
 - **User-Friendly GUI**: Beautiful Streamlit interface for transcript extraction
 - **Multiple Export Formats**: Plain text (TXT), SubRip (SRT), WebVTT, and JSON
 - **Real-time Feedback**: Shows transcript type (manual/auto-generated) and language
