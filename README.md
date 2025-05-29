@@ -5,11 +5,21 @@ ytFetch is a comprehensive toolkit for extracting YouTube video transcripts and 
 
 ## Features Overview 🌟
 
-### YouTube Transcript Extraction (`fetchTscript.py`)
+### YouTube Transcript Extraction
+#### Command-Line Tool (`fetchTscript.py`)
 - **Smart URL Parsing**: Supports all YouTube URL formats (`youtu.be`, `youtube.com/watch`, `/embed/`, `/v/`, `/shorts/`)
 - **Intelligent Transcript Hierarchy**: Prioritizes manually-created → auto-generated → any available language
 - **Automatic Fallback**: Downloads high-quality MP3 audio when transcripts aren't available
 - **Multi-language Support**: Attempts English first, then falls back to any available language
+- **Organized Output**: Saves files to `video_outputs/` directory
+
+#### Web Interface (`appStreamlit.py`) 🆕
+- **User-Friendly GUI**: Beautiful Streamlit interface for transcript extraction
+- **Multiple Export Formats**: Plain text (TXT), SubRip (SRT), WebVTT, and JSON
+- **Real-time Feedback**: Shows transcript type (manual/auto-generated) and language
+- **Debug Mode**: Optional detailed information for troubleshooting
+- **Download Options**: One-click download in your preferred format
+- **Video Metrics**: Displays segment count, duration, and character count
 
 ### Multi-Provider Audio Transcription (`transcribeVid.py`)
 - **Dual-Provider Intelligence**: Seamlessly switches between **Groq** and **OpenAI** APIs based on file size and performance
@@ -82,6 +92,7 @@ Set up your API keys in `config.yaml`:
 
 ### YouTube Transcript Extraction
 
+#### Command-Line Tool
 **Basic URL processing**:
 ```bash
 python fetchTscript.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -93,7 +104,22 @@ python fetchTscript.py
 # Enter URL when prompted
 ```
 
-**Output**: Creates `transcript_VIDEO_ID.txt` or falls back to `audio_VIDEO_ID.mp3`
+**Output**: Creates `video_outputs/transcript_VIDEO_ID.txt` or falls back to `video_outputs/audio_VIDEO_ID.mp3`
+
+#### Web Interface 🆕
+**Launch the Streamlit app**:
+```bash
+streamlit run appStreamlit.py
+```
+
+**Access at**: `http://localhost:8501`
+
+**Features**:
+- 📝 **Easy Input**: Just paste YouTube URL and click "Fetch Transcript"
+- 🌐 **Format Selection**: Choose between TXT, SRT, WebVTT, or JSON output
+- 📊 **Transcript Info**: See whether transcript is manual/auto-generated and language
+- 💾 **Instant Download**: Download transcripts in your preferred format
+- 🐛 **Debug Mode**: Toggle for detailed technical information
 
 ---
 
@@ -150,9 +176,11 @@ streamlit run transcribeVid.py
 ```
 ytFetch/
 ├── fetchTscript.py          # YouTube transcript extraction CLI
+├── appStreamlit.py          # YouTube transcript extraction web interface
 ├── transcribeVid.py         # Multi-provider transcription web app
 ├── config.yaml.example      # Configuration template
 ├── config.yaml             # Your API keys (git-ignored)
+├── video_outputs/          # Directory for transcript and audio outputs
 ├── CLAUDE.md               # Development documentation
 ├── README.md               # This file
 └── .gitignore              # Protects sensitive files
