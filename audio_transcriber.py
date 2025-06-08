@@ -566,12 +566,7 @@ def transcribe_audio_from_file(file_path, language="en"):
         # Get audio information
         audio = AudioSegment.from_file(preprocessed_file)
         duration_seconds = len(audio) // 1000
-        logger.info(f"The audio file is {duration_seconds} seconds long.")
-        
-        # For longer files, apply 10-minute limit as per spec
-        if duration_seconds > 600:  # 10 minutes
-            logger.warning(f"Audio is longer than 10 minutes ({duration_seconds}s). Aborting transcription.")
-            return None
+        logger.info(f"The audio file is {duration_seconds} seconds long. Proceeding with chunked transcription.")
 
         # Get chunk length and split audio
         chunk_length_ms = get_chunk_length_ms(preprocessed_file)

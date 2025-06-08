@@ -660,14 +660,13 @@ def get_transcript_with_fallback(video_id, api_key, credentials=None):
     # --- TIER 3: Try Audio Transcription via AI ---
     logging.info("TIER 3: Attempting audio transcription as a last resort...")
     
-    # Get video duration first
+    # Get video duration for informational purposes
     video_info = get_video_info(video_id)
     video_duration = video_info.get('duration', 0)
     
-    if video_duration <= 600:  # 10 minutes
-        logging.info(f"Video duration ({video_duration}s) is within the limit. Proceeding.")
-        
-        with st.spinner("🔍 Tier 3: Preparing for AI audio transcription..."):
+    logging.info(f"Video duration: {video_duration}s. Proceeding with chunked transcription.")
+    
+    with st.spinner("🔍 Tier 3: Preparing for AI audio transcription..."):
             try:
                 # Download audio to temporary file
                 with st.spinner("⬇️ Downloading audio for transcription..."):
@@ -718,11 +717,6 @@ def get_transcript_with_fallback(video_id, api_key, credentials=None):
                 failure_reasons.append(failure_reason)
                 logging.error(f"Audio transcription failed: {e}")
                 st.error(f"❌ Tier 3: {failure_reason}...")
-    else:
-        failure_reason = f"Video too long ({video_duration//60}:{video_duration%60:02d}) - exceeds 10-minute limit for AI transcription"
-        failure_reasons.append(failure_reason)
-        logging.info(f"Video is longer than 10 minutes ({video_duration}s). Skipping audio transcription.")
-        st.warning(f"⚠️ Tier 3: {failure_reason}")
 
     # If all methods fail - provide specific failure summary
     failure_summary = generate_failure_summary(failure_reasons, video_duration)
