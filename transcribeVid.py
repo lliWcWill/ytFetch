@@ -18,6 +18,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import re
+from audio_transcriber import transcribe_audio_from_file, initialize_clients, load_config
 
 # Set Streamlit page configuration
 st.set_page_config(page_title="MultiProvider Transcribe", layout="wide")
@@ -49,41 +50,6 @@ QUALITY_THRESHOLDS = {
 GROQ_RPM = 20  # Groq rate limit of 20 requests per minute
 OPENAI_RPM = 7500  # OpenAI rate limit of 7500 requests per minute
 FILE_SIZE_THRESHOLD_MB = 5  # Use OpenAI for files larger than this threshold
-
-# Load configuration and initialize clients
-def load_config():
-    """Load configuration from config.yaml file"""
-    try:
-        with open("config.yaml", "r") as file:
-            return yaml.safe_load(file)
-    except FileNotFoundError:
-        st.error("config.yaml file not found. Please create it with your API keys.")
-        st.stop()
-    except yaml.YAMLError:
-        st.error("Error parsing config.yaml. Please check its format.")
-        st.stop()
-
-def initialize_clients():
-    """Initialize the API clients with keys from config"""
-    config = load_config()
-    
-    # Initialize Groq client
-    groq_api_key = config.get("groq", {}).get("api_key")
-    if not groq_api_key or groq_api_key == "YOUR_GROQ_API_KEY_HERE":
-        st.warning("Groq API key is missing or invalid in config.yaml. Some functionality will be limited.")
-        groq_client = None
-    else:
-        groq_client = Groq(api_key=groq_api_key)
-        
-    # Initialize OpenAI client
-    openai_api_key = config.get("openai", {}).get("api_key")
-    if not openai_api_key or openai_api_key == "YOUR_OPENAI_API_KEY_HERE":
-        st.warning("OpenAI API key is missing or invalid in config.yaml. Some functionality will be limited.")
-        openai_client = None
-    else:
-        openai_client = openai.OpenAI(api_key=openai_api_key)
-        
-    return groq_client, openai_client
 
 # Initialize global clients
 groq_client, openai_client = initialize_clients()
@@ -672,128 +638,6 @@ def analyze_transcription_quality(quality_metrics):
     
     return analysis
 
-def process_audio_file(file_path, language="en"):
-    """
-    Process the audio file: preprocess, split if necessary, transcribe, and analyze quality.
-    
-    Args:
-        file_path (str): Path to the audio file
-        language (str): Language code (default: "en")
-        
-    Returns:
-        tuple: (full_transcription, quality_analysis) or (None, None) on failure
-    """
-    try:
-        # Preprocess the audio file
-        st.write("Preprocessing audio for optimal transcription...")
-        preprocessed_file = preprocess_audio(file_path)
-        
-        if not preprocessed_file:
-            st.error("Failed to preprocess audio file.")
-            return None, None
-            
-        st.success("Audio preprocessing complete.")
-        
-        # Get audio information
-        audio = AudioSegment.from_file(preprocessed_file)
-        duration_seconds = len(audio) // 1000
-        st.write(f"The audio file is {duration_seconds} seconds long.")
-        
-        # For longer files, confirm chunking
-        if duration_seconds > 600:  # 10 minutes
-            user_input = st.radio("The audio is longer than 10 minutes. Do you want to split it into smaller chunks for transcription?", ("Yes", "No"))
-            if user_input != "Yes":
-                st.error("Transcription aborted by user.")
-                return None, None
-
-        # Get chunk length and split audio
-        chunk_length_ms = get_chunk_length_ms(preprocessed_file)
-        if chunk_length_ms is None or chunk_length_ms <= 0:
-            st.error("Could not determine valid chunk length.")
-            return None, None
-
-        chunks = split_audio_with_overlap(preprocessed_file, chunk_length_ms)
-        if not chunks:
-            st.error("Failed to split audio file into chunks.")
-            return None, None
-
-        # Process each chunk
-        all_transcriptions = []
-        all_quality_metrics = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        # Show what chunks are available
-        logger.info(f"Generated {len(chunks)} chunks for processing.")
-        logger.info(f"First few chunks: {[c['path'] for c in chunks[:3]]}")
-        
-        providers_used = set()
-        
-        for i, chunk in enumerate(chunks):
-            chunk_num = i + 1
-            status_text.text(f"Transcribing chunk {chunk_num} of {len(chunks)}...")
-            
-            # Check that the chunk file exists before trying to transcribe
-            if not os.path.exists(chunk["path"]):
-                st.warning(f"Chunk file not found: {chunk['path']}. Skipping.")
-                continue
-                
-            # Determine provider based on file size
-            if chunk["size_mb"] > FILE_SIZE_THRESHOLD_MB and openai_client is not None:
-                provider = "openai"
-            elif groq_client is not None:
-                provider = "groq"
-            elif openai_client is not None:
-                provider = "openai"
-            else:
-                st.error("No transcription providers available.")
-                return None, None
-                
-            # Transcribe the chunk with the selected provider
-            if provider == "openai":
-                transcribed_text, quality_metrics = transcribe_with_openai(chunk["path"], language)
-            else:  # groq
-                transcribed_text, quality_metrics = transcribe_with_groq(chunk["path"], language)
-            
-            if transcribed_text:
-                all_transcriptions.append(transcribed_text)
-                if quality_metrics:
-                    all_quality_metrics.extend(quality_metrics)
-                    # Track which providers were used
-                    providers_used.update(m.get("provider", "unknown") for m in quality_metrics)
-            else:
-                st.warning(f"Failed to transcribe chunk {chunk_num}. Skipping.")
-                
-            # Clean up chunk file after transcription
-            try:
-                os.remove(chunk["path"])
-                logger.info(f"Removed chunk file: {chunk['path']}")
-            except Exception as e:
-                logger.warning(f"Failed to remove chunk file {chunk['path']}: {e}")
-            
-            # Update progress
-            progress_bar.progress((i + 1) / len(chunks))
-
-        # Clean up preprocessed file
-        if preprocessed_file != file_path and os.path.exists(preprocessed_file):
-            os.remove(preprocessed_file)
-            
-        # Analyze transcription quality
-        quality_analysis = analyze_transcription_quality(all_quality_metrics)
-        
-        # Log provider usage
-        if providers_used:
-            logger.info(f"Transcription providers used: {', '.join(providers_used)}")
-        
-        progress_bar.empty()
-        status_text.text("Transcription complete!")
-        
-        return "\n".join(all_transcriptions), quality_analysis
-
-    except Exception as e:
-        logger.error(f"An error occurred during audio processing: {e}")
-        st.error(f"An error occurred during audio processing: {e}")
-        return None, None
 
 def display_quality_analysis(quality_analysis):
     """
@@ -1183,10 +1027,11 @@ def main():
 
             if st.button("Start Transcription"):
                 with st.spinner(f"Processing audio using {'OpenAI' if selected_provider == 'openai' else 'Groq' if selected_provider == 'groq' else 'Auto'} mode..."):
-                    full_transcription, quality_analysis = process_audio_file(
+                    full_transcription = transcribe_audio_from_file(
                         temp_path, 
                         language
                     )
+                    quality_analysis = None  # Quality analysis not available with headless function
         finally:
             if 'temp_path' in locals() and os.path.exists(temp_path):
                 os.unlink(temp_path)  # Remove the temporary file
@@ -1198,10 +1043,11 @@ def main():
             return
 
         with st.spinner(f"Processing audio using {'OpenAI' if selected_provider == 'openai' else 'Groq' if selected_provider == 'groq' else 'Auto'} mode..."):
-            full_transcription, quality_analysis = process_audio_file(
+            full_transcription = transcribe_audio_from_file(
                 file_path, 
                 language
             )
+            quality_analysis = None  # Quality analysis not available with headless function
 
     # Display results
     if full_transcription:
@@ -1215,11 +1061,20 @@ def main():
         
         # Add download options
         col1, col2 = st.columns(2)
+        
+        # Prepare base filename from uploaded file or path
+        if uploaded_file is not None:
+            base_filename = uploaded_file.name.rsplit('.', 1)[0]  # Remove extension
+        elif file_path:
+            base_filename = Path(file_path).stem  # Get filename without extension
+        else:
+            base_filename = "transcription"
+            
         with col1:
             st.download_button(
                 label="Download as TXT",
                 data=full_transcription,
-                file_name="transcription.txt",
+                file_name=f"{base_filename}_transcription.txt",
                 mime="text/plain"
             )
         
@@ -1244,7 +1099,7 @@ def main():
                 st.download_button(
                     label="Download as SRT",
                     data=srt_content,
-                    file_name="transcription.srt",
+                    file_name=f"{base_filename}_transcription.srt",
                     mime="text/plain"
                 )
             except Exception as e:

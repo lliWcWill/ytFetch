@@ -1,0 +1,38 @@
+name: Run Project Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # The claude-code CLI would need to be installed here
+          # For now, we will use pytest directly
+          pip install pytest pytest-mock
+
+      - name: Run Pytest Suite
+        run: |
+          # This directly runs the test suite, which is a more standard CI practice
+          pytest
+        env:
+          # Example of how secrets would be passed if tests needed them
+          # For this project, tests should be mocked and not require live keys
+          API_KEY: ${{ secrets.SOME_DUMMY_KEY }}

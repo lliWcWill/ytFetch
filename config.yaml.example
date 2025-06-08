@@ -3,3 +3,6 @@ groq:
 
 openai:
   api_key: "your key"
+
+youtube:
+  api_key: "your YouTube Data API v3 key"
