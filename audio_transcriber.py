@@ -1,43 +1,42 @@
 import os
-import requests
 import logging
 import subprocess
-import json
+import time
 from pathlib import Path
 from pydub import AudioSegment
-from tqdm import tqdm
 import yaml
 import tempfile
-import io
-import time
 from groq import Groq
 import openai
-import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import multiprocessing
+from typing import List, Dict, Tuple, Optional
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Define constants
-MAX_FILE_SIZE_MB = 25  # Free tier limit for both Groq and OpenAI
-MAX_CHUNK_SIZE_MB = 24  # Slightly less than the limit to account for overhead
-CHUNK_OVERLAP_SECONDS = 5  # Add some overlap between chunks to maintain context
-QUALITY_THRESHOLDS = {
-    "avg_logprob": {
-        "good": -0.1,
-        "ok": -0.3,
-        "poor": -0.5
-    },
-    "no_speech_prob": {
-        "good": 0.1,
-        "ok": 0.3,
-        "poor": 0.5
-    }
+# ULTRA-OPTIMIZED CONSTANTS FOR DEV TIER 🚀
+MAX_FILE_SIZE_MB = 100  # Dev tier limit
+MAX_CHUNK_SIZE_MB = 90  # Leave headroom for FLAC metadata
+CHUNK_OVERLAP_SECONDS = 1  # Minimal overlap for maximum speed
+CHUNK_DURATION_SECONDS = 600  # 10-minute chunks! Fewer API calls = faster
+
+# AGGRESSIVE CONCURRENCY FOR DEV TIER
+MAX_CONCURRENT_REQUESTS = min(50, multiprocessing.cpu_count() * 4)  # Go hard!
+BATCH_SIZE = 10  # Process chunks in batches to avoid overwhelming
+
+# Dev tier rate limits - UPDATED FOR MAXIMUM THROUGHPUT
+GROQ_RPM_DEV = {
+    "distil-whisper-large-v3-en": 100,
+    "whisper-large-v3": 300,
+    "whisper-large-v3-turbo": 400
 }
-# Providers rate limits and thresholds
-GROQ_RPM = 20  # Groq rate limit of 20 requests per minute
-OPENAI_RPM = 7500  # OpenAI rate limit of 7500 requests per minute
-FILE_SIZE_THRESHOLD_MB = 5  # Use OpenAI for files larger than this threshold
+
+# Audio processing optimization
+OPTIMAL_SAMPLE_RATE = 16000  # Groq's preferred rate
+OPTIMAL_CHANNELS = 1  # Mono for speech
 
 def load_config():
     """Load configuration from config.yaml file"""
@@ -57,18 +56,16 @@ def initialize_clients():
     if not config:
         return None, None
     
-    # Initialize Groq client
     groq_api_key = config.get("groq", {}).get("api_key")
     if not groq_api_key or groq_api_key == "YOUR_GROQ_API_KEY_HERE":
-        logger.warning("Groq API key is missing or invalid in config.yaml. Some functionality will be limited.")
+        logger.warning("Groq API key is missing or invalid in config.yaml.")
         groq_client = None
     else:
         groq_client = Groq(api_key=groq_api_key)
         
-    # Initialize OpenAI client
     openai_api_key = config.get("openai", {}).get("api_key")
     if not openai_api_key or openai_api_key == "YOUR_OPENAI_API_KEY_HERE":
-        logger.warning("OpenAI API key is missing or invalid in config.yaml. Some functionality will be limited.")
+        logger.warning("OpenAI API key is missing or invalid in config.yaml.")
         openai_client = None
     else:
         openai_client = openai.OpenAI(api_key=openai_api_key)
@@ -78,559 +75,400 @@ def initialize_clients():
 # Initialize global clients
 groq_client, openai_client = initialize_clients()
 
-# Track API usage to respect rate limits
-api_usage = {
-    "groq": {
-        "last_minute_count": 0,
-        "last_minute_start": time.time()
-    },
-    "openai": {
-        "last_minute_count": 0,
-        "last_minute_start": time.time()
-    }
-}
-
-def update_api_usage(provider):
-    """
-    Update API usage tracking for rate limiting
-    
-    Args:
-        provider (str): 'groq' or 'openai'
-    
-    Returns:
-        bool: True if rate limit is not exceeded, False otherwise
-    """
-    current_time = time.time()
-    
-    # Reset counter if a minute has passed
-    if current_time - api_usage[provider]["last_minute_start"] > 60:
-        api_usage[provider]["last_minute_count"] = 1
-        api_usage[provider]["last_minute_start"] = current_time
-        return True
-    
-    # Increment counter
-    api_usage[provider]["last_minute_count"] += 1
-    
-    # Check if rate limit is exceeded
-    if provider == "groq" and api_usage["groq"]["last_minute_count"] > GROQ_RPM:
-        logger.warning(f"Groq rate limit exceeded ({GROQ_RPM} RPM). Waiting...")
-        return False
-    elif provider == "openai" and api_usage["openai"]["last_minute_count"] > OPENAI_RPM:
-        logger.warning(f"OpenAI rate limit exceeded ({OPENAI_RPM} RPM). Waiting...")
-        return False
+# Ultra-fast thread-safe rate limiter
+class OptimizedRateLimiter:
+    def __init__(self, rpm):
+        self.rpm = rpm
+        self.lock = threading.Lock()
+        self.requests = []
+        self.burst_allowed = min(rpm // 4, 20)  # Allow burst processing
         
-    return True
+    def wait_if_needed(self):
+        """Optimized rate limiting with burst support"""
+        with self.lock:
+            now = time.time()
+            # Remove requests older than 1 minute
+            self.requests = [t for t in self.requests if now - t < 60]
+            
+            # Allow burst processing for the first few requests
+            if len(self.requests) < self.burst_allowed:
+                self.requests.append(now)
+                return
+            
+            if len(self.requests) >= self.rpm:
+                # Calculate minimal wait time
+                oldest_request = min(self.requests)
+                wait_time = 60.01 - (now - oldest_request)  # Minimal buffer
+                if wait_time > 0:
+                    logger.debug(f"Rate limit pause: {wait_time:.2f}s")
+                    time.sleep(wait_time)
+                    return self.wait_if_needed()
+                    
+            self.requests.append(now)
 
-def preprocess_audio(input_file, output_file=None):
-    """
-    Preprocess audio file to 16kHz mono FLAC format as recommended by both Groq and OpenAI.
+def estimate_chunk_size_mb(duration_seconds: int, sample_rate: int = 16000) -> float:
+    """Estimate chunk size in MB for FLAC format"""
+    # FLAC compression ratio for speech is typically 50-60%
+    uncompressed_size = duration_seconds * sample_rate * 2  # 16-bit mono
+    compressed_size = uncompressed_size * 0.55  # Conservative estimate
+    return compressed_size / (1024 * 1024)
+
+def calculate_optimal_chunk_duration(file_duration_seconds: int) -> int:
+    """Calculate optimal chunk duration based on file size and dev tier limits"""
+    # Start with maximum possible duration
+    max_duration = CHUNK_DURATION_SECONDS
     
-    Args:
-        input_file (str): Path to input audio file
-        output_file (str, optional): Path to output file. If None, creates a temp file.
+    # Ensure chunk fits in file size limit
+    while estimate_chunk_size_mb(max_duration) > MAX_CHUNK_SIZE_MB:
+        max_duration -= 60  # Reduce by 1 minute
         
-    Returns:
-        str: Path to the preprocessed audio file
+    # For very long files, use larger chunks
+    if file_duration_seconds > 3600:  # Over 1 hour
+        return max_duration
+    elif file_duration_seconds > 1800:  # Over 30 minutes
+        return min(max_duration, 480)  # 8-minute chunks
+    elif file_duration_seconds > 600:  # Over 10 minutes
+        return min(max_duration, 300)  # 5-minute chunks
+    else:
+        return min(max_duration, 180)  # 3-minute chunks for short files
+
+def preprocess_audio_ultrafast(input_file: str, output_file: Optional[str] = None) -> Optional[str]:
+    """
+    Ultra-fast audio preprocessing with minimal overhead.
     """
     if output_file is None:
-        # Create a temporary file with .flac extension
         temp_dir = tempfile.gettempdir()
-        output_file = os.path.join(temp_dir, f"{Path(input_file).stem}_processed.flac")
+        output_file = os.path.join(temp_dir, f"{Path(input_file).stem}_groq_optimized.flac")
     
     try:
-        # Use ffmpeg to convert audio to 16kHz mono FLAC
+        # Ultra-fast ffmpeg settings
         cmd = [
             "ffmpeg",
             "-i", input_file,
-            "-ar", "16000",  # 16kHz sample rate
-            "-ac", "1",      # mono channel
-            "-map", "0:a",   # select audio stream
-            "-c:a", "flac",  # FLAC codec
-            "-y",            # overwrite output file if exists
+            "-ar", str(OPTIMAL_SAMPLE_RATE),
+            "-ac", str(OPTIMAL_CHANNELS),
+            "-map", "0:a:0",  # First audio stream only
+            "-c:a", "flac",
+            "-compression_level", "0",  # Fastest
+            "-threads", "0",  # Use all CPU cores
+            "-y",
+            "-loglevel", "error",  # Reduce output
             output_file
         ]
         
-        # Run ffmpeg process
-        process = subprocess.run(
-            cmd, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        start_time = time.time()
+        process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         
         if process.returncode != 0:
-            logger.error(f"Error preprocessing audio: {process.stderr}")
+            logger.error(f"FFmpeg error: {process.stderr}")
             return None
             
-        logger.info(f"Preprocessed audio saved to {output_file}")
+        elapsed = time.time() - start_time
+        file_size = os.path.getsize(output_file) / (1024 * 1024)
+        logger.info(f"Preprocessed in {elapsed:.2f}s → {output_file} ({file_size:.1f} MB)")
         return output_file
         
     except Exception as e:
-        logger.error(f"Error preprocessing audio: {e}")
+        logger.error(f"Preprocessing error: {e}")
         return None
 
-def get_chunk_length_ms(file_path, max_size_mb=MAX_CHUNK_SIZE_MB):
+def split_audio_ultrafast(file_path: str, chunk_duration_seconds: int, 
+                         overlap_seconds: int = CHUNK_OVERLAP_SECONDS) -> List[Dict]:
     """
-    Calculates the appropriate chunk length in milliseconds such that the exported file
-    does not exceed max_size_mb.
-    """
-    try:
-        audio = AudioSegment.from_file(file_path)
-        if len(audio) == 0:
-            return 0  # Handle empty audio files
-        duration_ms = len(audio)
-        max_size_bytes = max_size_mb * 1024 * 1024
-        
-        # Estimate chunk length based on desired size and total duration
-        # This is an approximation, as actual size depends on audio content and format
-        # We'll start with a reasonable guess (e.g., 60 seconds) and adjust
-        
-        chunk_length_ms = 60000  # Start with 60 seconds
-        chunk_length_ms = min(chunk_length_ms, duration_ms)  # Don't exceed total duration
-        
-        # Estimate size of a chunk of this length exported to WAV format
-        # Assuming 16kHz mono, 2 bytes per sample (16-bit)
-        bytes_per_second = 16000 * 2
-        estimated_size_bytes = (chunk_length_ms / 1000) * bytes_per_second
-        
-        # Adjust chunk length if estimated size is too large
-        if estimated_size_bytes > max_size_bytes and bytes_per_second > 0:
-            chunk_length_ms = int((max_size_bytes / bytes_per_second) * 1000)
-            chunk_length_ms = max(chunk_length_ms, 1000)  # Ensure minimum chunk length (1 second)
-            chunk_length_ms = min(chunk_length_ms, duration_ms)  # Don't exceed total duration
-
-        # Ensure chunk length doesn't exceed the total audio duration
-        chunk_length_ms = min(chunk_length_ms, duration_ms)
-
-        logger.info(f"Calculated chunk length: {chunk_length_ms} ms")
-        return chunk_length_ms
-    except Exception as e:
-        logger.error(f"Error calculating chunk length: {e}")
-        return None
-
-def split_audio_with_overlap(file_path, chunk_length_ms, overlap_seconds=CHUNK_OVERLAP_SECONDS):
-    """
-    Splits the audio file into smaller chunks with overlap, ensuring exported chunks
-    don't exceed MAX_CHUNK_SIZE_MB.
+    Ultra-fast audio splitting with parallel chunk creation.
     """
     try:
-        audio = AudioSegment.from_file(file_path)
+        # Get audio duration without loading entire file
+        probe_cmd = [
+            "ffprobe", "-v", "error", "-show_entries", 
+            "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", 
+            file_path
+        ]
+        duration_output = subprocess.check_output(probe_cmd, text=True)
+        total_duration_seconds = float(duration_output.strip())
+        
         chunks = []
-        file_path = Path(file_path)  # Convert to Path object if it's a string
-        overlap_ms = overlap_seconds * 1000
+        temp_dir = tempfile.gettempdir()
+        file_stem = Path(file_path).stem
         
-        # Use proper path handling to ensure correct file paths
-        temp_dir = os.path.dirname(file_path) if os.path.dirname(file_path) else "."
-        file_stem = os.path.basename(file_path.stem)
+        # Calculate chunk positions
+        chunk_positions = []
+        start_seconds = 0
+        chunk_index = 1
         
-        start_ms = 0
-        chunk_index = 1  # Start from 1 instead of 0
-        while start_ms < len(audio):
-            end_ms = min(start_ms + chunk_length_ms, len(audio))
-            chunk = audio[start_ms:end_ms]
-            
-            # Export the chunk with proper path handling
-            chunk_file_path = os.path.join(temp_dir, f"{file_stem}_chunk{chunk_index}.wav")
-            chunk.export(chunk_file_path, format="wav")
-            
-            # Get file size in MB
-            file_size_mb = os.path.getsize(chunk_file_path) / (1024 * 1024)
-            
-            # Debug logging
-            logger.info(f"Created chunk file: {chunk_file_path} ({file_size_mb:.2f} MB)")
-            
-            # Check actual size of the exported file
-            actual_size_bytes = os.path.getsize(chunk_file_path)
-            actual_size_mb = actual_size_bytes / (1024 * 1024)
-            
-            if actual_size_mb > MAX_CHUNK_SIZE_MB:
-                logger.warning(f"Chunk {chunk_index} ({actual_size_mb:.2f} MB) is larger than {MAX_CHUNK_SIZE_MB} MB. Reducing chunk size.")
-                # If a chunk is too large, reduce its duration and try again
-                new_chunk_length_ms = int((MAX_CHUNK_SIZE_MB / actual_size_mb) * chunk_length_ms)
-                new_chunk_length_ms = max(new_chunk_length_ms, 1000)  # Ensure minimum chunk length
-                new_chunk_length_ms = min(new_chunk_length_ms, len(audio) - start_ms)  # Don't exceed remaining duration
-                
-                if new_chunk_length_ms <= 0:
-                    logger.error(f"Could not reduce chunk {chunk_index} to a valid size. Skipping.")
-                    os.remove(chunk_file_path)  # Remove the oversized chunk file
-                    start_ms += chunk_length_ms - overlap_ms  # Move forward
-                    if start_ms < 0:
-                        start_ms += chunk_length_ms
-                    chunk_index += 1  # Increment chunk index
-                    continue  # Skip to the next iteration
-                
-                # Update chunk_length_ms for the next iteration (or just recalculate)
-                chunk_length_ms = new_chunk_length_ms
-                
-                # Recalculate end_ms with the new length
-                end_ms = min(start_ms + chunk_length_ms, len(audio))
-                chunk = audio[start_ms:end_ms]
-                
-                # Re-export the smaller chunk
-                os.remove(chunk_file_path)  # Remove the previous oversized file
-                chunk_file_path = os.path.join(temp_dir, f"{file_stem}_chunk{chunk_index}.wav")
-                chunk.export(chunk_file_path, format="wav")
-                actual_size_bytes = os.path.getsize(chunk_file_path)
-                actual_size_mb = actual_size_bytes / (1024 * 1024)
-                
-                if actual_size_mb > MAX_CHUNK_SIZE_MB:
-                    logger.error(f"Chunk {chunk_index} ({actual_size_mb:.2f} MB) is still larger than {MAX_CHUNK_SIZE_MB} MB after reduction. Skipping.")
-                    os.remove(chunk_file_path)  # Remove the oversized chunk file
-                    start_ms += chunk_length_ms - overlap_ms  # Move forward
-                    if start_ms < 0:
-                        start_ms += chunk_length_ms
-                    chunk_index += 1  # Increment chunk index
-                    continue  # Skip to the next iteration
-
-            # Store chunk info with metadata
-            chunks.append({
-                "path": chunk_file_path,
-                "size_mb": actual_size_mb,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "duration_ms": end_ms - start_ms
+        while start_seconds < total_duration_seconds:
+            end_seconds = min(start_seconds + chunk_duration_seconds, total_duration_seconds)
+            chunk_positions.append({
+                "index": chunk_index,
+                "start": start_seconds,
+                "end": end_seconds,
+                "duration": end_seconds - start_seconds
             })
+            start_seconds += chunk_duration_seconds - overlap_seconds
+            chunk_index += 1
+        
+        logger.info(f"Splitting into {len(chunk_positions)} chunks of ~{chunk_duration_seconds}s each")
+        
+        # Create chunks in parallel using threading
+        def create_chunk(pos):
+            chunk_path = os.path.join(temp_dir, f"{file_stem}_chunk{pos['index']}.flac")
             
-            # Update start position for the next chunk, considering overlap
-            start_ms += chunk_length_ms - overlap_ms
-            if start_ms < 0:  # Handle cases where overlap is larger than chunk length
-                start_ms += chunk_length_ms  # Move forward by full chunk length
+            # Ultra-fast chunk extraction
+            cmd = [
+                "ffmpeg",
+                "-ss", str(pos['start']),  # Seek to start
+                "-i", file_path,
+                "-t", str(pos['duration']),  # Duration
+                "-ar", str(OPTIMAL_SAMPLE_RATE),
+                "-ac", str(OPTIMAL_CHANNELS),
+                "-c:a", "flac",
+                "-compression_level", "0",
+                "-threads", "0",
+                "-y",
+                "-loglevel", "error",
+                chunk_path
+            ]
             
-            chunk_index += 1  # Increment chunk index
+            start_time = time.time()
+            process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+            if process.returncode == 0:
+                size_mb = os.path.getsize(chunk_path) / (1024 * 1024)
+                elapsed = time.time() - start_time
+                logger.debug(f"Chunk {pos['index']} created in {elapsed:.2f}s ({size_mb:.1f} MB)")
                 
+                return {
+                    "path": chunk_path,
+                    "size_mb": size_mb,
+                    "start_ms": pos['start'] * 1000,
+                    "end_ms": pos['end'] * 1000,
+                    "duration_ms": pos['duration'] * 1000,
+                    "index": pos['index']
+                }
+            else:
+                logger.error(f"Failed to create chunk {pos['index']}")
+                return None
+        
+        # Process chunks in parallel
+        with ThreadPoolExecutor(max_workers=min(8, len(chunk_positions))) as executor:
+            chunk_futures = [executor.submit(create_chunk, pos) for pos in chunk_positions]
+            
+            for future in as_completed(chunk_futures):
+                result = future.result()
+                if result:
+                    chunks.append(result)
+        
+        # Sort by index to maintain order
+        chunks.sort(key=lambda x: x['index'])
         return chunks
+        
     except Exception as e:
-        logger.error(f"Error splitting audio file with overlap: {e}")
+        logger.error(f"Error splitting audio: {e}")
         return []
 
-def transcribe_with_groq(audio_chunk_path, language="en", model="distil-whisper-large-v3-en"):
+def transcribe_chunk_ultrafast(chunk_info: Dict, language: str = "en", 
+                             model: str = "distil-whisper-large-v3-en",
+                             rate_limiter: Optional[OptimizedRateLimiter] = None) -> Tuple[int, Optional[str]]:
     """
-    Transcribes a single audio chunk using the Groq Whisper model.
-    
-    Args:
-        audio_chunk_path (str): Path to audio chunk file
-        language (str): Language code (default: "en")
-        model (str): Model to use (default: "distil-whisper-large-v3-en")
-    
-    Returns:
-        tuple: (transcription_text, quality_metrics) or (None, None) on failure
+    Ultra-fast chunk transcription with minimal overhead.
     """
     if groq_client is None:
-        logger.error("Groq client not initialized. Cannot transcribe with Groq.")
-        return None, None
-        
-    retries = 3
-    retry_delay = 5  # seconds
+        return chunk_info["index"], None
     
-    for attempt in range(retries):
-        # Check rate limit
-        if not update_api_usage("groq"):
-            time.sleep(60 - (time.time() - api_usage["groq"]["last_minute_start"]) + 1)
-            continue
-            
+    # Rate limiting
+    if rate_limiter:
+        rate_limiter.wait_if_needed()
+    
+    try:
+        start_time = time.time()
+        
+        with open(chunk_info["path"], "rb") as audio_file:
+            transcription = groq_client.audio.transcriptions.create(
+                file=audio_file,
+                model=model,
+                prompt="",  # Empty prompt is faster
+                response_format="text",
+                language=language,
+                temperature=0.0,
+            )
+        
+        elapsed = time.time() - start_time
+        audio_duration = chunk_info["duration_ms"] / 1000
+        speed_factor = audio_duration / elapsed if elapsed > 0 else 0
+        
+        logger.info(f"Chunk {chunk_info['index']}: {elapsed:.2f}s ({speed_factor:.0f}x realtime)")
+        
+        # Immediate cleanup
         try:
-            with open(audio_chunk_path, "rb") as audio_file:
-                # First, try with json format which will give us a structured object
-                transcription = groq_client.audio.transcriptions.create(
-                    file=audio_file,
-                    model=model,
-                    prompt="Please transcribe the audio content accurately.",
-                    response_format="json",  # Use simple json format
-                    language=language,
-                    temperature=0.0,
-                )
-                
-                # For basic JSON responses, we don't get segment-level metrics but at least get the text
-                # Create a simplified quality metrics structure
-                quality_metrics = [{
-                    "id": 0,
-                    "start": 0,
-                    "end": 0,
-                    "text": transcription.text,
-                    "avg_logprob": 0,  # Default values since not available
-                    "no_speech_prob": 0,
-                    "provider": "groq"
-                }]
-                
-                return transcription.text, quality_metrics
-                
-        except Exception as e:
-            logger.error(f"Groq transcription failed (attempt {attempt+1}/{retries}): {e}")
+            os.remove(chunk_info["path"])
+        except:
+            pass
             
-            # Try with text format as fallback
-            try:
-                with open(audio_chunk_path, "rb") as audio_file:
-                    text_response = groq_client.audio.transcriptions.create(
-                        file=audio_file,
-                        model=model,
-                        prompt="Please transcribe the audio content accurately.",
-                        response_format="text",  # Plain text as fallback
-                        language=language,
-                        temperature=0.0,
-                    )
-                    
-                    # For text responses, just return the text string directly
-                    # Create minimal quality metrics
-                    simple_metrics = [{
-                        "id": 0,
-                        "start": 0,
-                        "end": 0,
-                        "text": text_response,
-                        "avg_logprob": 0,
-                        "no_speech_prob": 0,
-                        "provider": "groq"
-                    }]
-                    
-                    return text_response, simple_metrics
-            except Exception as inner_e:
-                logger.error(f"Groq text format fallback also failed: {inner_e}")
-            
-            # Handle various error conditions
-            if "rate limit" in str(e).lower() or "429" in str(e):
-                # Rate limit error - wait longer
-                longer_delay = retry_delay * 2
-                logger.warning(f"Groq rate limit hit. Waiting {longer_delay} seconds...")
-                time.sleep(longer_delay)
-            elif "too large" in str(e).lower():
-                # File size error - can't retry with same file
-                logger.error("File too large for Groq processing.")
-                return None, None
-            elif "auth" in str(e).lower():
-                # Authentication error - can't retry
-                logger.error("Authentication error with Groq API.")
-                return None, None
-            else:
-                # General error - standard retry
-                if attempt < retries - 1:
-                    logger.info(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-            
-    logger.error(f"Failed to transcribe chunk with Groq after {retries} attempts")
-    return None, None
-
-def transcribe_with_openai(audio_chunk_path, language="en", model="whisper-1"):
-    """
-    Transcribes a single audio chunk using the OpenAI Whisper model.
-    
-    Args:
-        audio_chunk_path (str): Path to audio chunk file
-        language (str): Language code (default: "en")
-        model (str): Model to use (default: "whisper-1")
-    
-    Returns:
-        tuple: (transcription_text, quality_metrics) or (None, None) on failure
-    """
-    if openai_client is None:
-        logger.error("OpenAI client not initialized. Cannot transcribe with OpenAI.")
-        return None, None
+        return chunk_info["index"], transcription
         
-    retries = 3
-    retry_delay = 5  # seconds
-    
-    for attempt in range(retries):
-        # Check rate limit
-        if not update_api_usage("openai"):
-            time.sleep(60 - (time.time() - api_usage["openai"]["last_minute_start"]) + 1)
-            continue
-            
+    except Exception as e:
+        logger.error(f"Chunk {chunk_info['index']} error: {e}")
         try:
-            with open(audio_chunk_path, "rb") as audio_file:
-                # Try to get verbose json response with metrics when using the appropriate models
-                try_verbose = model in ["gpt-4o-transcribe", "gpt-4o-mini-transcribe"]
-                response_format = "verbose_json" if try_verbose else "json"
-                
-                transcription = openai_client.audio.transcriptions.create(
-                    file=audio_file,
-                    model=model,
-                    prompt="Please transcribe the audio content accurately.",
-                    response_format=response_format,
-                    language=language if language else None  # OpenAI doesn't like empty string
-                )
-                
-                # Check if we got a verbose response with segments
-                if try_verbose and hasattr(transcription, "segments") and transcription.segments:
-                    # Extract quality metrics from the segments
-                    quality_metrics = []
-                    
-                    for segment in transcription.segments:
-                        metrics = {
-                            "id": segment.id,
-                            "start": segment.start,
-                            "end": segment.end,
-                            "text": segment.text,
-                            "avg_logprob": segment.avg_logprob,
-                            "no_speech_prob": segment.no_speech_prob,
-                            "provider": "openai"
-                        }
-                        quality_metrics.append(metrics)
-                else:
-                    # For standard json responses, we just get the text
-                    quality_metrics = [{
-                        "id": 0,
-                        "start": 0,
-                        "end": 0,
-                        "text": transcription.text,
-                        "avg_logprob": 0,  # Default values since not available
-                        "no_speech_prob": 0,
-                        "provider": "openai"
-                    }]
-                
-                return transcription.text, quality_metrics
-                
-        except Exception as e:
-            logger.error(f"OpenAI transcription failed (attempt {attempt+1}/{retries}): {e}")
-            
-            # Handle various error conditions
-            if "rate limit" in str(e).lower() or "429" in str(e):
-                # Rate limit error - wait longer
-                longer_delay = retry_delay * 2
-                logger.warning(f"OpenAI rate limit hit. Waiting {longer_delay} seconds...")
-                time.sleep(longer_delay)
-            elif "too large" in str(e).lower():
-                # File size error - can't retry with same file
-                logger.error("File too large for OpenAI processing.")
-                return None, None
-            elif "auth" in str(e).lower() or "invalid api key" in str(e).lower():
-                # Authentication error - can't retry
-                logger.error("Authentication error with OpenAI API.")
-                return None, None
-            else:
-                # General error - standard retry
-                if attempt < retries - 1:
-                    logger.info(f"Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-            
-    logger.error(f"Failed to transcribe chunk with OpenAI after {retries} attempts")
-    return None, None
+            os.remove(chunk_info["path"])
+        except:
+            pass
+        return chunk_info["index"], None
 
-def select_transcription_provider(chunk_info, preferred_provider=None):
+def transcribe_audio_ultrafast(file_path: str, language: str = "en") -> Optional[str]:
     """
-    Selects the appropriate transcription provider based on file size, rate limits, and preferences.
-    
-    Args:
-        chunk_info (dict): Information about the chunk
-        preferred_provider (str, optional): User's preferred provider if any
-    
-    Returns:
-        str: 'openai' or 'groq'
-    """
-    # If only one provider is available, use that
-    if groq_client is None and openai_client is not None:
-        return "openai"
-    elif openai_client is None and groq_client is not None:
-        return "groq"
-    elif groq_client is None and openai_client is None:
-        logger.error("No transcription providers available. Please configure at least one API key.")
-        return None
-    
-    # Honor user preference if specified
-    if preferred_provider in ["openai", "groq"]:
-        return preferred_provider
-    
-    # Use OpenAI for larger files (higher quality, higher rate limits)
-    if chunk_info["size_mb"] > FILE_SIZE_THRESHOLD_MB:
-        return "openai"
-    
-    # Check rate limits - if Groq is approaching limit, use OpenAI
-    current_time = time.time()
-    if (current_time - api_usage["groq"]["last_minute_start"] <= 60 and 
-        api_usage["groq"]["last_minute_count"] >= GROQ_RPM * 0.8):
-        return "openai"
-    
-    # Default to Groq for smaller files to save OpenAI credits
-    return "groq"
-
-def transcribe_audio_from_file(file_path, language="en"):
-    """
-    Process the audio file: preprocess, split if necessary, transcribe, and analyze quality.
-    This is the headless version without Streamlit dependencies.
-    
-    Args:
-        file_path (str): Path to the audio file
-        language (str): Language code (default: "en")
-        
-    Returns:
-        str: Full transcription text or None on failure
+    Ultra-fast audio transcription optimized for Groq dev tier.
     """
     try:
-        # Preprocess the audio file
-        logger.info("Preprocessing audio for optimal transcription...")
-        preprocessed_file = preprocess_audio(file_path)
+        total_start = time.time()
         
+        # Select optimal model
+        model = "distil-whisper-large-v3-en" if language == "en" else "whisper-large-v3-turbo"
+        rpm_limit = GROQ_RPM_DEV.get(model, 100)
+        
+        logger.info(f"🚀 Starting ULTRA-FAST transcription with {model}")
+        logger.info(f"   Rate limit: {rpm_limit} RPM, Max concurrent: {MAX_CONCURRENT_REQUESTS}")
+        
+        # Preprocess audio
+        logger.info("⚡ Preprocessing audio...")
+        preprocessed_file = preprocess_audio_ultrafast(file_path)
         if not preprocessed_file:
-            logger.error("Failed to preprocess audio file.")
             return None
-            
-        logger.info("Audio preprocessing complete.")
         
-        # Get audio information
+        # Get duration and calculate optimal chunk size
         audio = AudioSegment.from_file(preprocessed_file)
         duration_seconds = len(audio) // 1000
-        logger.info(f"The audio file is {duration_seconds} seconds long. Proceeding with chunked transcription.")
-
-        # Get chunk length and split audio
-        chunk_length_ms = get_chunk_length_ms(preprocessed_file)
-        if chunk_length_ms is None or chunk_length_ms <= 0:
-            logger.error("Could not determine valid chunk length.")
-            return None
-
-        chunks = split_audio_with_overlap(preprocessed_file, chunk_length_ms)
-        if not chunks:
-            logger.error("Failed to split audio file into chunks.")
-            return None
-
-        # Process each chunk
-        all_transcriptions = []
+        optimal_chunk_duration = calculate_optimal_chunk_duration(duration_seconds)
         
-        # Show what chunks are available
-        logger.info(f"Generated {len(chunks)} chunks for processing.")
+        logger.info(f"📊 Audio: {duration_seconds}s, Chunk size: {optimal_chunk_duration}s")
         
-        for i, chunk in enumerate(chunks):
-            chunk_num = i + 1
-            logger.info(f"Transcribing chunk {chunk_num} of {len(chunks)}...")
-            
-            # Check that the chunk file exists before trying to transcribe
-            if not os.path.exists(chunk["path"]):
-                logger.warning(f"Chunk file not found: {chunk['path']}. Skipping.")
-                continue
-                
-            # Determine provider based on file size
-            if chunk["size_mb"] > FILE_SIZE_THRESHOLD_MB and openai_client is not None:
-                provider = "openai"
-            elif groq_client is not None:
-                provider = "groq"
-            elif openai_client is not None:
-                provider = "openai"
-            else:
-                logger.error("No transcription providers available.")
-                return None
-                
-            # Transcribe the chunk with the selected provider
-            if provider == "openai":
-                transcribed_text, quality_metrics = transcribe_with_openai(chunk["path"], language)
-            else:  # groq
-                transcribed_text, quality_metrics = transcribe_with_groq(chunk["path"], language)
-            
-            if transcribed_text:
-                all_transcriptions.append(transcribed_text)
-            else:
-                logger.warning(f"Failed to transcribe chunk {chunk_num}. Skipping.")
-                
-            # Clean up chunk file after transcription
-            try:
-                os.remove(chunk["path"])
-                logger.info(f"Removed chunk file: {chunk['path']}")
-            except Exception as e:
-                logger.warning(f"Failed to remove chunk file {chunk['path']}: {e}")
-
-        # Clean up preprocessed file
+        # Split audio
+        split_start = time.time()
+        chunks = split_audio_ultrafast(preprocessed_file, optimal_chunk_duration)
+        split_time = time.time() - split_start
+        
+        logger.info(f"✂️  Split into {len(chunks)} chunks in {split_time:.2f}s")
+        
+        # Cleanup preprocessed file early
         if preprocessed_file != file_path and os.path.exists(preprocessed_file):
             os.remove(preprocessed_file)
         
-        logger.info("Transcription complete!")
+        # Create rate limiter
+        rate_limiter = OptimizedRateLimiter(rpm_limit)
         
-        return "\n".join(all_transcriptions)
-
+        # ULTRA-FAST PARALLEL TRANSCRIPTION
+        transcription_start = time.time()
+        transcriptions = {}
+        
+        # Determine optimal worker count
+        optimal_workers = min(
+            MAX_CONCURRENT_REQUESTS,
+            len(chunks),
+            rpm_limit // 10  # Don't exceed 10% of rate limit per second
+        )
+        
+        logger.info(f"🔥 Transcribing with {optimal_workers} parallel workers...")
+        
+        with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
+            # Submit all chunks
+            futures = {
+                executor.submit(
+                    transcribe_chunk_ultrafast, 
+                    chunk, 
+                    language, 
+                    model,
+                    rate_limiter
+                ): chunk for chunk in chunks
+            }
+            
+            # Track progress
+            completed = 0
+            for future in as_completed(futures):
+                chunk_index, transcription = future.result()
+                completed += 1
+                
+                if transcription:
+                    transcriptions[chunk_index] = transcription
+                    
+                # Progress update every 25%
+                progress = completed / len(chunks) * 100
+                if completed % max(1, len(chunks) // 4) == 0:
+                    elapsed = time.time() - transcription_start
+                    eta = (elapsed / completed) * (len(chunks) - completed)
+                    logger.info(f"   Progress: {progress:.0f}% ({completed}/{len(chunks)}) ETA: {eta:.1f}s")
+        
+        transcription_time = time.time() - transcription_start
+        
+        # Combine transcriptions
+        full_transcription = " ".join(
+            transcriptions.get(i, "") for i in range(1, len(chunks) + 1)
+        ).strip()
+        
+        # Calculate performance metrics
+        total_time = time.time() - total_start
+        actual_speed_factor = duration_seconds / total_time if total_time > 0 else 0
+        transcription_speed = duration_seconds / transcription_time if transcription_time > 0 else 0
+        
+        # Performance report
+        logger.info("=" * 60)
+        logger.info("🏁 TRANSCRIPTION COMPLETE - PERFORMANCE REPORT")
+        logger.info("=" * 60)
+        logger.info(f"📝 Audio duration: {duration_seconds:,} seconds ({duration_seconds/60:.1f} minutes)")
+        logger.info(f"⚡ Total time: {total_time:.2f} seconds")
+        logger.info(f"🚀 Transcription time: {transcription_time:.2f} seconds")
+        logger.info(f"📊 Preprocessing time: {split_time:.2f} seconds")
+        logger.info(f"🔥 Overall speed: {actual_speed_factor:.1f}x realtime")
+        logger.info(f"💨 Transcription speed: {transcription_speed:.1f}x realtime")
+        logger.info(f"✅ Success rate: {len(transcriptions)}/{len(chunks)} chunks")
+        logger.info("=" * 60)
+        
+        return full_transcription
+        
     except Exception as e:
-        logger.error(f"An error occurred during audio processing: {e}")
+        logger.error(f"Transcription failed: {e}")
         return None
+
+# Backward compatible function
+def transcribe_audio_from_file(file_path: str, language: str = "en") -> Optional[str]:
+    """
+    Backward compatible ultra-fast transcription.
+    """
+    return transcribe_audio_ultrafast(file_path, language)
+
+# Performance testing function
+def benchmark_transcription(file_path: str):
+    """
+    Benchmark transcription performance.
+    """
+    logger.info("🏃 Running transcription benchmark...")
+    
+    # Test with different configurations
+    configs = [
+        {"chunks": 180, "workers": 10},
+        {"chunks": 300, "workers": 20},
+        {"chunks": 600, "workers": 30},
+    ]
+    
+    for config in configs:
+        global CHUNK_DURATION_SECONDS, MAX_CONCURRENT_REQUESTS
+        CHUNK_DURATION_SECONDS = config["chunks"]
+        MAX_CONCURRENT_REQUESTS = config["workers"]
+        
+        logger.info(f"\nTesting: {config['chunks']}s chunks, {config['workers']} workers")
+        start = time.time()
+        result = transcribe_audio_ultrafast(file_path)
+        elapsed = time.time() - start
+        
+        if result:
+            logger.info(f"   Time: {elapsed:.2f}s")
+            logger.info(f"   Words: {len(result.split())}")
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 2 and sys.argv[1] == "benchmark":
+        benchmark_transcription(sys.argv[2])
+    elif len(sys.argv) > 1:
+        result = transcribe_audio_from_file(sys.argv[1])
+        if result:
+            print(f"\nTranscription ({len(result.split())} words):")
+            print("-" * 50)
+            print(result[:500] + "..." if len(result) > 500 else result)

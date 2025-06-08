@@ -48,5 +48,3 @@ audio_*.mp3
 transcript_*.txt
 *_processed.flac
 
-# Google OAuth
-client_secret.json

@@ -10,13 +10,10 @@ import yaml
 import os
 import tempfile
 import logging
-import googleapiclient.discovery
-import googleapiclient.errors
-import io
-from googleapiclient.http import MediaIoBaseDownload
 from audio_transcriber import transcribe_audio_from_file
 import isodate
-from auth_utils import get_credentials
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import random
 
 # --- Configuration Loading ---
 
@@ -34,7 +31,6 @@ def load_config():
 
 # Load configuration at startup
 config = load_config()
-youtube_api_key = config.get("youtube", {}).get("api_key")
 
 
 # --- Core Transcript Logic (adapted from your script) ---
@@ -133,224 +129,31 @@ def get_video_id_from_url(youtube_url):
             return parsed_url.path.split('/')[2].split('?')[0]
     return None
 
+@retry(
+    retry=retry_if_exception_type(Exception),
+    stop=stop_after_attempt(4),
+    wait=wait_exponential(multiplier=2, min=2, max=10)
+)
 def fetch_transcript_segments(video_id):
     """
-    Fetches transcript segments for a given video ID.
-    Returns a tuple: (segments_list, transcript_info, error_message)
+    Fetches transcript segments using tenacity for robust,
+    production-grade retry logic with exponential backoff.
     """
-    print(f"\n🔍 DEBUG: Starting fetch_transcript_segments for video_id: {video_id}")
-    
-    if not video_id:
-        print("❌ DEBUG: Invalid video_id provided")
-        return None, "", "Invalid Video ID."
-    
+    print(f"\n🔍 DEBUG: Attempting to fetch transcript for video_id: {video_id}")
     try:
-        # Add timeout and retry logic with better error handling
-        import time
-        max_retries = 5  # Increased retries
-        retry_delay = 3  # Start with longer delay
-        
-        print(f"🔄 DEBUG: Starting retry loop with max_retries={max_retries}, initial_delay={retry_delay}s")
-        
-        for attempt in range(max_retries):
-            print(f"\n📍 DEBUG: Attempt {attempt + 1}/{max_retries}")
-            try:
-                # Clear any potential cache or session issues
-                if attempt > 0:
-                    print(f"⏱️  DEBUG: Waiting 0.5s before retry attempt...")
-                    time.sleep(0.5)  # Small delay before retry
-                    
-                # Use a longer timeout for long videos
-                print(f"🌐 DEBUG: Calling YouTubeTranscriptApi.list_transcripts({video_id})")
-                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                print(f"✅ DEBUG: Successfully got transcript_list object")
-                
-                # Verify we got valid data
-                print(f"🔍 DEBUG: Testing transcript_list by converting to list...")
-                test_list = list(transcript_list)
-                print(f"📋 DEBUG: Found {len(test_list)} available transcripts: {[(t.language, t.language_code, t.is_generated) for t in test_list]}")
-                
-                if test_list:  # If we have transcripts, we're good
-                    print(f"✅ DEBUG: Transcript list validation successful, re-fetching for processing...")
-                    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)  # Re-fetch for iterator
-                    break
-                else:
-                    print(f"❌ DEBUG: Empty transcript list received from YouTube")
-                    raise Exception("Empty transcript list received")
-                    
-            except Exception as e:
-                error_str = str(e).lower()
-                print(f"💥 DEBUG: Exception in attempt {attempt + 1}: {type(e).__name__}: {str(e)}")
-                print(f"🔍 DEBUG: Error string analysis - error_str: '{error_str}'")
-                
-                # Check for XML parsing errors specifically
-                if "no element found" in error_str or "xml" in error_str:
-                    print(f"🔴 DEBUG: Detected XML parsing error")
-                    if attempt < max_retries - 1:
-                        retry_msg = f"⚠️ YouTube returned empty response (attempt {attempt + 1}/{max_retries}). Retrying in {retry_delay} seconds..."
-                        print(f"⏳ DEBUG: {retry_msg}")
-                        with st.container():
-                            st.warning(retry_msg)
-                            progress_bar = st.progress(0)
-                            for i in range(int(retry_delay)):
-                                progress_bar.progress((i + 1) / retry_delay)
-                                time.sleep(1)
-                            progress_bar.empty()
-                        retry_delay = min(retry_delay * 1.5, 10)  # Cap at 10 seconds
-                        print(f"🔄 DEBUG: Next retry_delay will be {retry_delay}s")
-                    else:
-                        # On final attempt, try one more time with a long delay
-                        print(f"🔴 DEBUG: Final attempt failed with XML error, trying extended delay...")
-                        st.warning("❌ Final retry attempt with extended delay...")
-                        progress_bar = st.progress(0)
-                        for i in range(10):
-                            progress_bar.progress((i + 1) / 10)
-                            time.sleep(1)
-                        progress_bar.empty()
-                        raise e
-                else:
-                    # For other errors, use original retry logic
-                    print(f"🟡 DEBUG: Non-XML error detected")
-                    if attempt < max_retries - 1:
-                        print(f"⏳ DEBUG: Retrying non-XML error in {retry_delay}s...")
-                        st.warning(f"⚠️ Attempt {attempt + 1} failed: {str(e)[:100]}... Retrying in {retry_delay} seconds...")
-                        progress_bar = st.progress(0)
-                        for i in range(int(retry_delay)):
-                            progress_bar.progress((i + 1) / retry_delay)
-                            time.sleep(1)
-                        progress_bar.empty()
-                        retry_delay *= 2  # Exponential backoff
-                        print(f"🔄 DEBUG: Next retry_delay will be {retry_delay}s")
-                    else:
-                        print(f"🔴 DEBUG: All retry attempts exhausted with non-XML error")
-                        raise e
-        
-        print(f"🎯 DEBUG: Successfully exited retry loop, proceeding with transcript selection...")
-        transcript_obj = None
-        transcript_info = ""
-        
-        # Get all available transcripts for debugging
-        print(f"🔍 DEBUG: Re-listing transcripts for selection...")
-        available_transcripts = list(transcript_list)
-        debug_info = f"Available transcripts: {[(t.language, t.language_code, t.is_generated) for t in available_transcripts]}"
-        print(f"📋 DEBUG: {debug_info}")
-        
-        # Prioritize English, then first available
-        print(f"🎯 DEBUG: Attempting to find manually created English transcript...")
-        try:
-            transcript_obj = transcript_list.find_manually_created_transcript(['en', 'en-US', 'en-GB'])
-            transcript_info = f"Manually created English transcript. {debug_info}"
-            print(f"✅ DEBUG: Found manually created English transcript")
-        except NoTranscriptFound:
-            print(f"⚠️  DEBUG: No manually created English transcript, trying auto-generated...")
-            try:
-                transcript_obj = transcript_list.find_generated_transcript(['en', 'en-US', 'en-GB'])
-                transcript_info = f"Auto-generated English transcript. {debug_info}"
-                print(f"✅ DEBUG: Found auto-generated English transcript")
-            except NoTranscriptFound:
-                print(f"⚠️  DEBUG: No English transcripts found, using first available...")
-                if available_transcripts:
-                    transcript_obj = available_transcripts[0]
-                    transcript_info = f"Transcript in {transcript_obj.language} (code: {transcript_obj.language_code}), Generated: {transcript_obj.is_generated}. {debug_info}"
-                    print(f"✅ DEBUG: Using first available transcript: {transcript_obj.language} ({transcript_obj.language_code})")
-                else:
-                    print(f"❌ DEBUG: No transcripts available at all")
-                    return None, "", f"No transcripts available for this video. {debug_info}"
-        
-        if not transcript_obj:
-            print(f"❌ DEBUG: transcript_obj is None after selection process")
-            return None, "", f"Could not select a transcript. {debug_info}"
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        transcript_obj = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+        fetched_segments = transcript_obj.fetch()
 
-        # Fetch segments with progress indication for long videos
-        print(f"📥 DEBUG: About to fetch transcript data from selected transcript...")
-        st.info("Fetching transcript segments (this might take a while for long videos)...")
-        print(f"🌐 DEBUG: Calling transcript_obj.fetch()...")
-        fetched_transcript = transcript_obj.fetch()
-        print(f"✅ DEBUG: Successfully fetched transcript data, type: {type(fetched_transcript)}")
-        
-        # Handle the FetchedTranscript object - extract segments from the snippets property
-        if hasattr(fetched_transcript, 'snippets'):
-            # New API version returns FetchedTranscript object with snippets property
-            fetched_segments = []
-            for snippet in fetched_transcript.snippets:
-                # Check if snippet is already a dict or if it's an object with attributes
-                if isinstance(snippet, dict):
-                    fetched_segments.append(snippet)
-                else:
-                    # Convert FetchedTranscriptSnippet objects to dictionaries
-                    segment_dict = {
-                        'text': snippet.text,
-                        'start': snippet.start,
-                        'duration': snippet.duration
-                    }
-                    fetched_segments.append(segment_dict)
-        elif isinstance(fetched_transcript, list):
-            # Old API version returns list directly - check if items are dicts or objects
-            fetched_segments = []
-            for item in fetched_transcript:
-                if isinstance(item, dict):
-                    fetched_segments.append(item)
-                else:
-                    # Convert objects to dictionaries
-                    segment_dict = {
-                        'text': getattr(item, 'text', ''),
-                        'start': getattr(item, 'start', 0),
-                        'duration': getattr(item, 'duration', 0)
-                    }
-                    fetched_segments.append(segment_dict)
-        else:
-            # Try to convert to list if it's iterable
-            try:
-                temp_list = list(fetched_transcript)
-                fetched_segments = []
-                for item in temp_list:
-                    if isinstance(item, dict):
-                        fetched_segments.append(item)
-                    else:
-                        segment_dict = {
-                            'text': getattr(item, 'text', ''),
-                            'start': getattr(item, 'start', 0),
-                            'duration': getattr(item, 'duration', 0)
-                        }
-                        fetched_segments.append(segment_dict)
-            except Exception as convert_error:
-                return None, "", f"Could not convert transcript data to list: {convert_error}. Got type: {type(fetched_transcript)}. {debug_info}"
-        
-        # Validate segments
         if not fetched_segments:
-            return None, "", f"Transcript object returned empty segments. {debug_info}"
-        
-        if not isinstance(fetched_segments, list):
-            return None, "", f"Expected list of segments, got {type(fetched_segments)}. {debug_info}"
-        
-        if len(fetched_segments) == 0:
-            return None, "", f"Transcript segments list is empty. {debug_info}"
-        
-        # Check if segments have the expected structure
-        sample_segment = fetched_segments[0] if fetched_segments else {}
-        if not isinstance(sample_segment, dict) or 'text' not in sample_segment:
-            return None, "", f"Invalid segment structure. Sample: {sample_segment}. {debug_info}"
-        
-        return fetched_segments, transcript_info, None
+            raise ValueError("Fetched transcript data is empty.")
 
-    except TranscriptsDisabled:
-        return None, "", f"Transcripts are disabled for video: {video_id}. This often happens with copyrighted content or creator settings."
-    except NoTranscriptFound: # Should be caught by earlier logic, but as a fallback
-        return None, "", f"No transcript found for video: {video_id}. The video may not have captions available."
-    except VideoUnavailable:
-        return None, "", f"Video {video_id} is unavailable (private, deleted, etc.)."
+        print("✅ DEBUG: Successfully fetched and validated transcript segments.")
+        return fetched_segments, transcript_obj.language, None
+
     except Exception as e:
-        error_msg = str(e)
-        if "HTTP Error 429" in error_msg:
-            return None, "", f"Rate limit exceeded. Please wait a few minutes before trying again. Error: {error_msg}"
-        elif "connection" in error_msg.lower():
-            return None, "", f"Connection error. This might be due to network issues or IP blocking. Error: {error_msg}"
-        elif "no element found" in error_msg.lower():
-            return None, "", f"XML parsing error. This might be a temporary YouTube issue. Please try again in a moment. Error: {error_msg}"
-        elif "line 1, column 0" in error_msg:
-            return None, "", f"Empty response received. This might be a temporary YouTube issue. Please try again in a moment. Error: {error_msg}"
-        else:
-            return None, "", f"An unexpected error occurred: {error_msg}"
+        print(f"💥 DEBUG: An error occurred. Tenacity will handle the retry. Error: {e}")
+        raise e # Re-raise the exception for tenacity to catch.
 
 def parse_srt_to_segments(srt_text):
     """Parse SRT format text into segments compatible with existing format."""
@@ -563,165 +366,6 @@ def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None
         logging.error(f"Error downloading audio: {e}")
         return None
 
-def get_transcript_with_fallback(video_id, api_key, credentials=None):
-    """
-    Tries to fetch a transcript using a cascading fallback strategy.
-    Returns a tuple: (transcript_text, method_used, failure_reasons)
-    """
-    failure_reasons = []
-    
-    # --- TIER 1: Try Official YouTube Data API v3 ---
-    if credentials:
-        logging.info("TIER 1: Attempting to fetch with Official YouTube API (Authenticated)...")
-        st.info("Tier 1: Attempting to fetch with Official YouTube API (Authenticated)...")
-        
-        with st.spinner("🔍 Tier 1: Checking for official manual captions (OAuth2)..."):
-            try:
-                youtube = googleapiclient.discovery.build("youtube", "v3", credentials=credentials)
-                captions_request = youtube.captions().list(part="snippet", videoId=video_id)
-                captions_response = captions_request.execute()
-
-                if captions_response.get("items"):
-                    logging.info("Success: Found manually uploaded caption track(s).")
-                    # Prefer manual captions over auto-generated
-                    manual_captions = [item for item in captions_response["items"] 
-                                     if item["snippet"].get("trackKind") != "ASR"]
-                    
-                    if manual_captions:
-                        caption_id = manual_captions[0]["id"]
-                        logging.info(f"Using manual caption track: {caption_id}")
-                    else:
-                        caption_id = captions_response["items"][0]["id"]
-                        logging.info(f"Using first available caption track: {caption_id}")
-                    
-                    download_request = youtube.captions().download(id=caption_id, tfmt="srt")
-                    fh = io.BytesIO()
-                    downloader = MediaIoBaseDownload(fh, download_request)
-                    
-                    done = False
-                    while not done:
-                        status, done = downloader.next_chunk()
-                    
-                    fh.seek(0)
-                    transcript = fh.read().decode('utf-8')
-                    st.success("✅ Tier 1: Official YouTube API (OAuth2) succeeded!")
-                    return (transcript, "Official YouTube API (OAuth2)", [])
-                else:
-                    failure_reason = "No manual captions found via Official API (OAuth2)"
-                    failure_reasons.append(failure_reason)
-                    logging.info(failure_reason)
-                    st.warning(f"⚠️ Tier 1: {failure_reason}")
-
-            except googleapiclient.errors.HttpError as e:
-                failure_reason = f"Official API (OAuth2) HTTP Error: {str(e)[:100]}"
-                failure_reasons.append(failure_reason)
-                logging.error(f"Official API failed with HTTP Error: {e}")
-                st.warning(f"⚠️ Tier 1: {failure_reason}...")
-            except Exception as e:
-                failure_reason = f"Official API (OAuth2) unexpected error: {str(e)[:100]}"
-                failure_reasons.append(failure_reason)
-                logging.error(f"Unexpected error with official API: {e}")
-                st.warning(f"⚠️ Tier 1: {failure_reason}...")
-    else:
-        st.info("Tier 1 Skipped: User is not authenticated.")
-        failure_reasons.append("Tier 1 skipped: No OAuth2 authentication")
-
-    # --- TIER 2: Try Unofficial youtube-transcript-api Library ---
-    logging.info("TIER 2: Attempting to fetch with unofficial library...")
-    
-    # Retry logic for unofficial library
-    max_attempts = 3
-    retry_delay = 3  # seconds
-    
-    for attempt in range(max_attempts):
-        with st.spinner(f"🔍 Tier 2: Searching for auto-generated transcripts (attempt {attempt + 1}/{max_attempts})..."):
-            segments, info, error = fetch_transcript_segments(video_id)
-            if segments:
-                logging.info("Success: Found auto-generated transcript.")
-                transcript = format_segments(segments, "txt")
-                st.success("✅ Tier 2: Unofficial transcript API succeeded!")
-                return (transcript, "Unofficial Transcript Library", failure_reasons)
-            else:
-                failure_reason = f"Unofficial API failed (attempt {attempt + 1}): {error[:100] if error else 'Unknown error'}"
-                logging.info(f"Unofficial library failed on attempt {attempt + 1}. Error: {error}")
-                
-                if attempt < max_attempts - 1:  # Not the last attempt
-                    st.warning(f"⚠️ Tier 2: {failure_reason}... Retrying in {retry_delay} seconds...")
-                    # Show a progress bar for the wait time
-                    progress_bar = st.progress(0)
-                    for i in range(retry_delay):
-                        progress_bar.progress((i + 1) / retry_delay)
-                        time.sleep(1)
-                    progress_bar.empty()
-                else:  # Last attempt
-                    failure_reasons.append(f"Unofficial API failed after {max_attempts} attempts: {error[:100] if error else 'Unknown error'}")
-                    st.warning(f"⚠️ Tier 2: All {max_attempts} attempts failed...")
-
-    # --- TIER 3: Try Audio Transcription via AI ---
-    logging.info("TIER 3: Attempting audio transcription as a last resort...")
-    
-    # Get video duration for informational purposes
-    video_info = get_video_info(video_id)
-    video_duration = video_info.get('duration', 0)
-    
-    logging.info(f"Video duration: {video_duration}s. Proceeding with chunked transcription.")
-    
-    with st.spinner("🔍 Tier 3: Preparing for AI audio transcription..."):
-            try:
-                # Download audio to temporary file
-                with st.spinner("⬇️ Downloading audio for transcription..."):
-                    audio_path = download_audio_as_mp3(video_id, output_dir="video_outputs", 
-                                                     video_title=video_info.get('title'))
-                
-                if audio_path and os.path.exists(audio_path):
-                    logging.info(f"Audio downloaded successfully: {audio_path}")
-                    
-                    # Transcribe audio
-                    with st.spinner("🤖 Transcribing audio with AI..."):
-                        transcript = transcribe_audio_from_file(audio_path, language="en")
-                    
-                    # Clean up audio file
-                    try:
-                        os.remove(audio_path)
-                        logging.info(f"Cleaned up temporary audio file: {audio_path}")
-                    except Exception as cleanup_error:
-                        logging.warning(f"Failed to clean up audio file: {cleanup_error}")
-                    
-                    if transcript:
-                        # Add video title and URL to the transcript
-                        video_url = f"https://www.youtube.com/watch?v={video_id}"
-                        video_title = video_info.get('title', f'video_{video_id}')
-                        
-                        # Prepend video info to transcript
-                        full_transcript = f"Video Title: {video_title}\n"
-                        full_transcript += f"YouTube URL: {video_url}\n"
-                        full_transcript += f"Video ID: {video_id}\n"
-                        full_transcript += "-" * 80 + "\n\n"
-                        full_transcript += transcript
-                        
-                        st.success("✅ Tier 3: AI audio transcription succeeded!")
-                        return (full_transcript, "AI Audio Transcription", failure_reasons)
-                    else:
-                        failure_reason = "AI transcription produced empty results"
-                        failure_reasons.append(failure_reason)
-                        logging.error("Audio transcription returned empty result")
-                        st.error(f"❌ Tier 3: {failure_reason}")
-                else:
-                    failure_reason = "Audio download failed"
-                    failure_reasons.append(failure_reason)
-                    logging.error("Audio download failed")
-                    st.error(f"❌ Tier 3: {failure_reason}")
-                    
-            except Exception as e:
-                failure_reason = f"Audio transcription error: {str(e)[:100]}"
-                failure_reasons.append(failure_reason)
-                logging.error(f"Audio transcription failed: {e}")
-                st.error(f"❌ Tier 3: {failure_reason}...")
-
-    # If all methods fail - provide specific failure summary
-    failure_summary = generate_failure_summary(failure_reasons, video_duration)
-    st.error(failure_summary)
-    return (None, "All methods failed", failure_reasons)
 
 def generate_failure_summary(failure_reasons, video_duration):
     """Generate a specific failure message based on what went wrong."""
@@ -750,32 +394,6 @@ def generate_failure_summary(failure_reasons, video_duration):
 st.set_page_config(page_title="YouTube Transcript Fetcher", layout="wide")
 st.title("🎬 YouTube Transcript Fetcher")
 
-# --- CORRECTED Authentication Sidebar ---
-st.sidebar.title("Authentication")
-
-# Initialize credentials in the session state if they don't exist.
-# This happens only ONCE per session.
-if 'credentials' not in st.session_state:
-    st.session_state.credentials = None
-
-# Let get_credentials() manage the flow. It will return an auth_url
-# if the user needs to log in, and it will handle the redirect itself.
-auth_url = get_credentials()
-
-# The UI now simply READS the state to decide what to show.
-# It does NOT change the state itself.
-if st.session_state.get('credentials'):
-    # STATE 1: User is successfully authenticated.
-    st.sidebar.success("✅ Authenticated with Google")
-else:
-    # STATE 2: User is NOT authenticated.
-    if auth_url:
-        # Show the login button if we have a URL for it.
-        st.sidebar.link_button("Authenticate with Google", auth_url, use_container_width=True)
-        st.sidebar.info("Authenticate to enable fetching of official, manually-uploaded transcripts (Tier 1).")
-    else:
-        # This state occurs during the redirect or if there's an error.
-        st.sidebar.warning("Awaiting authentication...")
 
 # Initialize session state variables
 if 'video_id' not in st.session_state:
@@ -798,16 +416,23 @@ if 'transcript_cache' not in st.session_state:
 # Debug mode toggle
 st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=st.session_state.debug_mode)
 
-# URL Input with form for Enter key support
-with st.form(key="url_form"):
-    url = st.text_input("Enter YouTube Video URL:", key="youtube_url_input")
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        submit_button = st.form_submit_button("Fetch Transcript", use_container_width=True)
-    with col2:
-        st.caption("💡 Tip: Press Enter to fetch transcript")
+# URL Input
+url = st.text_input("Enter YouTube Video URL:", key="youtube_url_input")
 
-if submit_button:
+# Transcription method selection
+st.subheader("Choose Transcription Method")
+col1, col2 = st.columns(2)
+
+with col1:
+    unofficial_button = st.button("📝 Unofficial Transcripts", use_container_width=True, 
+                                 help="Fetches existing YouTube transcripts (auto-generated or manual)")
+    
+with col2:
+    groq_button = st.button("🤖 Groq AI Transcription", use_container_width=True,
+                           help="Downloads audio and transcribes using Groq Dev Tier (super fast!)")
+
+# Handle button clicks
+if unofficial_button or groq_button:
     print(f"\n🎬 DEBUG: ===== SUBMIT BUTTON PRESSED =====")
     print(f"🔗 DEBUG: Input URL: '{url}'")
     
@@ -858,53 +483,98 @@ if submit_button:
                     
                     print(f"🚀 DEBUG: Starting transcript fetch process with multi-tier fallback...")
                     
-                    # Use the new multi-tier orchestrator
-                    transcript_text, method_used, failure_reasons = get_transcript_with_fallback(
-                        video_id, 
-                        youtube_api_key, 
-                        credentials=st.session_state.get('credentials')
-                    )
-                    print(f"🏁 DEBUG: get_transcript_with_fallback returned - method: {method_used}")
+                    # Handle different methods based on button clicked
+                    if unofficial_button:
+                        # Try unofficial method only
+                        st.info("Tier 1: Attempting to fetch public transcript...")
+                        try:
+                            segments, lang, _ = fetch_transcript_segments(video_id)
+                            if segments:
+                                st.success("✅ Tier 1: Public transcript found!")
+                                st.session_state.fetched_segments = segments
+                                st.session_state.transcript_type_info = f"Fetched using: Unofficial Library ({lang})"
+                                st.session_state.error_message = None
+                                
+                                # Cache the successful result
+                                st.session_state.transcript_cache[video_id] = {
+                                    'segments': segments,
+                                    'info': f"Fetched using: Unofficial Library ({lang})",
+                                    'video_info': st.session_state.video_info
+                                }
+                        except Exception as e:
+                            st.error(f"⚠️ Unofficial transcript fetch failed: {e}")
+                            st.session_state.error_message = "Could not fetch unofficial transcript. Try the Groq AI method."
+                            st.session_state.fetched_segments = None
+                            st.session_state.transcript_type_info = ""
                     
-                    if transcript_text: # Success
-                        print(f"✅ DEBUG: Successfully fetched transcript using: {method_used}")
-                        status_container.success(f"✅ Transcript fetched successfully using {method_used}!")
-                        progress_container.empty()
-                        time.sleep(1)  # Brief pause to show success
-                        status_container.empty()
+                    elif groq_button:
+                        # Use Groq AI transcription directly
+                        st.info("🤖 Using Groq Dev Tier AI transcription (super fast!)...")
                         
-                        # Convert transcript text to segments format for compatibility
-                        # For non-segment based methods, create a single segment
-                        if method_used == "Official YouTube API":
-                            # SRT format - parse into segments
-                            segments = parse_srt_to_segments(transcript_text)
-                        elif method_used == "AI Audio Transcription":
-                            # Plain text - create single segment
-                            segments = [{"text": transcript_text, "start": 0, "duration": 0}]
-                        else:
-                            # This shouldn't happen as Tier 2 already returns segments
-                            # But fallback to single segment
-                            segments = [{"text": transcript_text, "start": 0, "duration": 0}]
+                        # Get video info for duration check
+                        video_info = st.session_state.video_info
+                        video_duration = video_info.get('duration', 0)
                         
-                        st.session_state.fetched_segments = segments
-                        st.session_state.transcript_type_info = f"Fetched using: {method_used}"
-                        st.session_state.error_message = None
-                        
-                        # Cache the successful result
-                        st.session_state.transcript_cache[video_id] = {
-                            'segments': segments,
-                            'info': f"Fetched using: {method_used}",
-                            'video_info': st.session_state.video_info
-                        }
-                    else: # All methods failed
-                        print(f"❌ DEBUG: All transcript methods failed")
-                        print(f"❌ DEBUG: Failure reasons: {failure_reasons}")
-                        status_container.empty()
-                        progress_container.empty()
-                        # Error message is already displayed by the orchestrator function
-                        st.session_state.error_message = None  # Don't duplicate error message
-                        st.session_state.fetched_segments = None
-                        st.session_state.transcript_type_info = ""
+                        with st.spinner("🔍 Preparing for Groq AI transcription..."):
+                            try:
+                                # Download audio to temporary file
+                                with st.spinner("⬇️ Downloading audio for transcription..."):
+                                    audio_path = download_audio_as_mp3(video_id, output_dir="video_outputs", 
+                                                                     video_title=video_info.get('title'))
+                                
+                                if audio_path and os.path.exists(audio_path):
+                                    logging.info(f"Audio downloaded successfully: {audio_path}")
+                                    
+                                    # Transcribe audio using the new optimized function
+                                    with st.spinner("🚀 Transcribing audio with Groq Dev Tier (super fast!)..."):
+                                        transcript = transcribe_audio_from_file(audio_path, language="en")
+                                    
+                                    # Clean up audio file
+                                    try:
+                                        os.remove(audio_path)
+                                        logging.info(f"Cleaned up temporary audio file: {audio_path}")
+                                    except Exception as cleanup_error:
+                                        logging.warning(f"Failed to clean up audio file: {cleanup_error}")
+                                    
+                                    if transcript:
+                                        # Add video title and URL to the transcript
+                                        video_url = f"https://www.youtube.com/watch?v={video_id}"
+                                        video_title = video_info.get('title', f'video_{video_id}')
+                                        
+                                        # Prepend video info to transcript
+                                        full_transcript = f"Video Title: {video_title}\n"
+                                        full_transcript += f"YouTube URL: {video_url}\n"
+                                        full_transcript += f"Video ID: {video_id}\n"
+                                        full_transcript += "-" * 80 + "\n\n"
+                                        full_transcript += transcript
+                                        
+                                        st.success("✅ Groq AI transcription succeeded!")
+                                        st.session_state.fetched_segments = [{"text": full_transcript, "start": 0, "duration": 0}]
+                                        st.session_state.transcript_type_info = "Fetched using: Groq Dev Tier AI Transcription"
+                                        st.session_state.error_message = None
+                                        
+                                        # Cache the result
+                                        st.session_state.transcript_cache[video_id] = {
+                                            'segments': st.session_state.fetched_segments,
+                                            'info': "Fetched using: Groq Dev Tier AI Transcription",
+                                            'video_info': st.session_state.video_info
+                                        }
+                                    else:
+                                        st.error("❌ Groq AI transcription produced empty results")
+                                        st.session_state.error_message = "Groq transcription failed"
+                                        st.session_state.fetched_segments = None
+                                        st.session_state.transcript_type_info = ""
+                                else:
+                                    st.error("❌ Audio download failed")
+                                    st.session_state.error_message = "Could not download audio"
+                                    st.session_state.fetched_segments = None
+                                    st.session_state.transcript_type_info = ""
+                                    
+                            except Exception as e:
+                                st.error(f"❌ Groq AI transcription error: {str(e)[:100]}")
+                                st.session_state.error_message = f"Groq transcription error: {str(e)[:100]}"
+                                st.session_state.fetched_segments = None
+                                st.session_state.transcript_type_info = ""
         else:
             st.session_state.error_message = "Could not extract Video ID from URL. Please check the URL format and try again."
             # Show what video ID was extracted for debugging
