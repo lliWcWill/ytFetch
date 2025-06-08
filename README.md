@@ -1,39 +1,14 @@
 # ⚡ ytFetch
 # YouTube Transcript & AI Audio Transcription Toolkit
 
-|version| |python_version| |ubuntu| |macos| |windows| |coverage| |conda| |license|
-
-.. |version| image:: https://img.shields.io/github/v/release/lliWcWill/ytFetch.svg
-   :target: https://github.com/lliWcWill/ytFetch/releases
-   :alt: Latest Release
-
-.. |python_version| image:: https://img.shields.io/badge/python-3.8%2B-blue.svg
-   :target: https://www.python.org/downloads/
-   :alt: Python 3.8+
-
-.. |ubuntu| image:: https://img.shields.io/badge/ubuntu-20.04%2B-orange.svg
-   :target: https://ubuntu.com/
-   :alt: Ubuntu 20.04+
-
-.. |macos| image:: https://img.shields.io/badge/macOS-10.15%2B-blue.svg
-   :target: https://www.apple.com/macos/
-   :alt: macOS 10.15+
-
-.. |windows| image:: https://img.shields.io/badge/windows-10%2B-blue.svg
-   :target: https://www.microsoft.com/windows/
-   :alt: Windows 10+
-
-.. |coverage| image:: https://img.shields.io/badge/coverage-90%25-brightgreen.svg
-   :target: #
-   :alt: Test Coverage
-
-.. |conda| image:: https://img.shields.io/badge/conda-compatible-green.svg
-   :target: https://anaconda.org/
-   :alt: Conda Compatible
-
-.. |license| image:: https://img.shields.io/badge/license-MIT-green.svg
-   :target: https://opensource.org/licenses/MIT
-   :alt: MIT License
+[![Latest Release](https://img.shields.io/github/v/release/lliWcWill/ytFetch.svg)](https://github.com/lliWcWill/ytFetch/releases)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![Ubuntu 20.04+](https://img.shields.io/badge/ubuntu-20.04%2B-orange.svg)](https://ubuntu.com/)
+[![macOS 10.15+](https://img.shields.io/badge/macOS-10.15%2B-blue.svg)](https://www.apple.com/macos/)
+[![Windows 10+](https://img.shields.io/badge/windows-10%2B-blue.svg)](https://www.microsoft.com/windows/)
+[![Test Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)](#)
+[![Conda Compatible](https://img.shields.io/badge/conda-compatible-green.svg)](https://anaconda.org/)
+[![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
 > **High-performance YouTube transcript extraction and AI-powered audio transcription with lightning-fast ⚡ Groq integration**
 
