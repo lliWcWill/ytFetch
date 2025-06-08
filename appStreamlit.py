@@ -321,8 +321,8 @@ def format_segments(segments, output_format="txt"):
     except Exception as e:
         return f"Error formatting transcript: {str(e)}"
 
-def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None):
-    """Download the audio of a YouTube video as MP3 using yt-dlp."""
+def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None, progress_placeholder=None, status_placeholder=None):
+    """Download the audio of a YouTube video as MP3 using yt-dlp with progress tracking."""
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     
     os.makedirs(output_dir, exist_ok=True)
@@ -337,6 +337,39 @@ def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None
     
     output_template = os.path.join(output_dir, f"{safe_title}.%(ext)s")
     final_mp3_path = os.path.join(output_dir, f"{safe_title}.mp3")
+    
+    # Track download progress
+    download_info = {
+        'downloaded_bytes': 0,
+        'total_bytes': 0,
+        'speed': 0,
+        'eta': 0
+    }
+    
+    def progress_hook(d):
+        if d['status'] == 'downloading':
+            download_info['downloaded_bytes'] = d.get('downloaded_bytes', 0)
+            download_info['total_bytes'] = d.get('total_bytes', 1)
+            download_info['speed'] = d.get('speed', 0)
+            download_info['eta'] = d.get('eta', 0)
+            
+            # Update progress bar if provided
+            if progress_placeholder and download_info['total_bytes'] > 0:
+                progress = download_info['downloaded_bytes'] / download_info['total_bytes']
+                progress_placeholder.progress(progress)
+                
+            # Update status text if provided
+            if status_placeholder:
+                if download_info['speed']:
+                    speed_mb = download_info['speed'] / 1024 / 1024
+                    percent = (download_info['downloaded_bytes'] / max(download_info['total_bytes'], 1)) * 100
+                    status_placeholder.text(f"⬇️ Downloading audio: {percent:.1f}% ({speed_mb:.1f} MB/s)")
+                    
+        elif d['status'] == 'finished':
+            if status_placeholder:
+                status_placeholder.text("✅ Download complete! Processing audio file...")
+            if progress_placeholder:
+                progress_placeholder.progress(1.0)
 
     ydl_opts = {
         'format': 'bestaudio/best',
@@ -348,6 +381,7 @@ def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None
         'outtmpl': output_template,
         'quiet': True,
         'no_warnings': True,
+        'progress_hooks': [progress_hook],
     }
 
     try:
@@ -515,66 +549,118 @@ if unofficial_button or groq_button:
                         video_info = st.session_state.video_info
                         video_duration = video_info.get('duration', 0)
                         
-                        with st.spinner("🔍 Preparing for Groq AI transcription..."):
-                            try:
-                                # Download audio to temporary file
-                                with st.spinner("⬇️ Downloading audio for transcription..."):
-                                    audio_path = download_audio_as_mp3(video_id, output_dir="video_outputs", 
-                                                                     video_title=video_info.get('title'))
+                        # Create containers for the multi-stage process
+                        stage_container = st.container()
+                        with stage_container:
+                            download_status = st.empty()
+                            download_progress = st.empty()
+                            transcription_status = st.empty()
+                            transcription_progress = st.empty()
+                        
+                        try:
+                            # Stage 1: Download audio with progress tracking
+                            download_status.info("📥 Stage 1: Downloading video audio...")
+                            download_progress.progress(0)
+                            
+                            audio_path = download_audio_as_mp3(
+                                video_id, 
+                                output_dir="video_outputs", 
+                                video_title=video_info.get('title'),
+                                progress_placeholder=download_progress,
+                                status_placeholder=download_status
+                            )
+                            
+                            if audio_path and os.path.exists(audio_path):
+                                logging.info(f"Audio downloaded successfully: {audio_path}")
                                 
-                                if audio_path and os.path.exists(audio_path):
-                                    logging.info(f"Audio downloaded successfully: {audio_path}")
+                                # Show completion of download stage
+                                download_status.success("✅ Audio download complete!")
+                                download_progress.progress(1.0)
+                                
+                                # Small pause for visual feedback
+                                time.sleep(0.5)
+                                
+                                # Stage 2: Transcription
+                                transcription_status.info("🎯 Stage 2: Starting AI transcription...")
+                                transcription_progress.progress(0)
+                                
+                                # Create progress callback
+                                def update_transcription_progress(stage, progress, message):
+                                    """Update UI based on transcription stage"""
+                                    if stage == "preprocessing":
+                                        # Map preprocessing to 0-20% of transcription progress
+                                        transcription_progress.progress(progress * 0.2)
+                                        transcription_status.info(f"🎯 Stage 2: {message}")
+                                    elif stage == "chunking":
+                                        # Map chunking to 20-30% of transcription progress
+                                        transcription_progress.progress(0.2 + progress * 0.1)
+                                        transcription_status.info(f"🎯 Stage 2: {message}")
+                                    elif stage == "transcribing":
+                                        # Map actual transcription to 30-100% of transcription progress
+                                        transcription_progress.progress(0.3 + progress * 0.7)
+                                        transcription_status.info(f"🎯 Stage 2: {message}")
+                                
+                                # Transcribe audio using the new optimized function
+                                transcript = transcribe_audio_from_file(audio_path, language="en", 
+                                                                      progress_callback=update_transcription_progress)
+                                
+                                # Clean up audio file
+                                try:
+                                    os.remove(audio_path)
+                                    logging.info(f"Cleaned up temporary audio file: {audio_path}")
+                                except Exception as cleanup_error:
+                                    logging.warning(f"Failed to clean up audio file: {cleanup_error}")
+                                
+                                if transcript:
+                                    # Complete the progress
+                                    transcription_progress.progress(1.0)
+                                    transcription_status.success("✅ Transcription complete!")
                                     
-                                    # Transcribe audio using the new optimized function
-                                    with st.spinner("🚀 Transcribing audio with Groq Dev Tier (super fast!)..."):
-                                        transcript = transcribe_audio_from_file(audio_path, language="en")
+                                    # Add video title and URL to the transcript
+                                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                                    video_title = video_info.get('title', f'video_{video_id}')
                                     
-                                    # Clean up audio file
-                                    try:
-                                        os.remove(audio_path)
-                                        logging.info(f"Cleaned up temporary audio file: {audio_path}")
-                                    except Exception as cleanup_error:
-                                        logging.warning(f"Failed to clean up audio file: {cleanup_error}")
+                                    # Prepend video info to transcript
+                                    full_transcript = f"Video Title: {video_title}\n"
+                                    full_transcript += f"YouTube URL: {video_url}\n"
+                                    full_transcript += f"Video ID: {video_id}\n"
+                                    full_transcript += "-" * 80 + "\n\n"
+                                    full_transcript += transcript
                                     
-                                    if transcript:
-                                        # Add video title and URL to the transcript
-                                        video_url = f"https://www.youtube.com/watch?v={video_id}"
-                                        video_title = video_info.get('title', f'video_{video_id}')
-                                        
-                                        # Prepend video info to transcript
-                                        full_transcript = f"Video Title: {video_title}\n"
-                                        full_transcript += f"YouTube URL: {video_url}\n"
-                                        full_transcript += f"Video ID: {video_id}\n"
-                                        full_transcript += "-" * 80 + "\n\n"
-                                        full_transcript += transcript
-                                        
-                                        st.success("✅ Groq AI transcription succeeded!")
-                                        st.session_state.fetched_segments = [{"text": full_transcript, "start": 0, "duration": 0}]
-                                        st.session_state.transcript_type_info = "Fetched using: Groq Dev Tier AI Transcription"
-                                        st.session_state.error_message = None
-                                        
-                                        # Cache the result
-                                        st.session_state.transcript_cache[video_id] = {
-                                            'segments': st.session_state.fetched_segments,
-                                            'info': "Fetched using: Groq Dev Tier AI Transcription",
-                                            'video_info': st.session_state.video_info
-                                        }
-                                    else:
-                                        st.error("❌ Groq AI transcription produced empty results")
-                                        st.session_state.error_message = "Groq transcription failed"
-                                        st.session_state.fetched_segments = None
-                                        st.session_state.transcript_type_info = ""
+                                    # Clear the progress indicators after a short delay
+                                    time.sleep(1)
+                                    download_status.empty()
+                                    download_progress.empty()
+                                    transcription_status.empty()
+                                    transcription_progress.empty()
+                                    
+                                    st.success("✅ Groq AI transcription succeeded!")
+                                    st.session_state.fetched_segments = [{"text": full_transcript, "start": 0, "duration": 0}]
+                                    st.session_state.transcript_type_info = "Fetched using: Groq Dev Tier AI Transcription"
+                                    st.session_state.error_message = None
+                                    
+                                    # Cache the result
+                                    st.session_state.transcript_cache[video_id] = {
+                                        'segments': st.session_state.fetched_segments,
+                                        'info': "Fetched using: Groq Dev Tier AI Transcription",
+                                        'video_info': st.session_state.video_info
+                                    }
                                 else:
-                                    st.error("❌ Audio download failed")
-                                    st.session_state.error_message = "Could not download audio"
+                                    transcription_status.error("❌ Groq AI transcription produced empty results")
+                                    st.session_state.error_message = "Groq transcription failed"
                                     st.session_state.fetched_segments = None
                                     st.session_state.transcript_type_info = ""
-                                    
-                            except Exception as e:
-                                st.error(f"❌ Groq AI transcription error: {str(e)[:100]}")
-                                st.session_state.error_message = f"Groq transcription error: {str(e)[:100]}"
+                            else:
+                                download_status.error("❌ Audio download failed")
+                                st.session_state.error_message = "Could not download audio"
                                 st.session_state.fetched_segments = None
                                 st.session_state.transcript_type_info = ""
+                                
+                        except Exception as e:
+                            st.error(f"❌ Groq AI transcription error: {str(e)[:100]}")
+                            st.session_state.error_message = f"Groq transcription error: {str(e)[:100]}"
+                            st.session_state.fetched_segments = None
+                            st.session_state.transcript_type_info = ""
         else:
             st.session_state.error_message = "Could not extract Video ID from URL. Please check the URL format and try again."
             # Show what video ID was extracted for debugging
