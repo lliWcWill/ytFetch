@@ -10,26 +10,28 @@ import yaml
 import tempfile
 from groq import Groq
 import openai
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import multiprocessing
 from typing import List, Dict, Tuple, Optional
+import random  # Add this import
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ULTRA-OPTIMIZED CONSTANTS FOR DEV TIER 🚀
+# UPDATED CONSTANTS FOR BETTER LARGE FILE HANDLING
 MAX_FILE_SIZE_MB = 100  # Dev tier limit
 MAX_CHUNK_SIZE_MB = 90  # Leave headroom for FLAC metadata
 CHUNK_OVERLAP_SECONDS = 0.5  # Minimal overlap for maximum speed
 CHUNK_DURATION_SECONDS = 60  # Default 60s for more parallelism!
 
-# AGGRESSIVE CONCURRENCY FOR DEV TIER
-MAX_CONCURRENT_REQUESTS = min(50, multiprocessing.cpu_count() * 5)  # Even more aggressive!
-BATCH_SIZE = 10  # Process chunks in batches to avoid overwhelming
+# CONSERVATIVE CONCURRENCY FOR LARGE FILES
+MAX_CONCURRENT_REQUESTS = min(50, multiprocessing.cpu_count() * 5)  
+BATCH_SIZE = 10  
 
-# Dev tier rate limits - UPDATED FOR MAXIMUM THROUGHPUT
+# Dev tier rate limits
 GROQ_RPM_DEV = {
     "distil-whisper-large-v3-en": 100,
     "whisper-large-v3": 300,
@@ -37,8 +39,8 @@ GROQ_RPM_DEV = {
 }
 
 # Audio processing optimization
-OPTIMAL_SAMPLE_RATE = 16000  # Groq's preferred rate
-OPTIMAL_CHANNELS = 1  # Mono for speech
+OPTIMAL_SAMPLE_RATE = 16000  
+OPTIMAL_CHANNELS = 1  
 
 def load_config():
     """Load configuration from config.yaml file"""
@@ -77,89 +79,123 @@ def initialize_clients():
 # Initialize global clients
 groq_client, openai_client = initialize_clients()
 
-# Ultra-fast thread-safe rate limiter
-class OptimizedRateLimiter:
-    def __init__(self, rpm):
+# NEW: Calculate optimal workers based on file size
+def calculate_workers_for_file_size(duration_seconds: int, rpm_limit: int) -> int:
+    """
+    Calculate optimal number of workers based on file duration and rate limits.
+    More conservative for larger files to avoid 503 errors.
+    """
+    if duration_seconds < 1800:  # < 30 minutes
+        return min(10, rpm_limit // 10)
+    elif duration_seconds < 7200:  # < 2 hours
+        return min(5, rpm_limit // 15)
+    elif duration_seconds < 14400:  # < 4 hours
+        return min(3, rpm_limit // 20)
+    else:  # 4+ hours - be very conservative
+        return 2  # Only 2 workers for massive files
+
+# NEW: Strict rate limiter without burst processing
+class StrictRateLimiter:
+    def __init__(self, rpm, conservative=False):
         self.rpm = rpm
         self.lock = threading.Lock()
         self.requests = []
-        self.burst_allowed = min(rpm // 4, 20)  # Allow burst processing
+        # For large files, be more conservative
+        self.safety_factor = 0.5 if conservative else 0.8
+        self.effective_rpm = int(rpm * self.safety_factor)
+        logger.info(f"Rate limiter initialized: {self.effective_rpm} effective RPM (base: {rpm})")
         
     def wait_if_needed(self):
-        """Optimized rate limiting with burst support"""
+        """Strict rate limiting without burst allowance"""
         with self.lock:
             now = time.time()
             # Remove requests older than 1 minute
             self.requests = [t for t in self.requests if now - t < 60]
             
-            # Allow burst processing for the first few requests
-            if len(self.requests) < self.burst_allowed:
-                self.requests.append(now)
-                return
-            
-            if len(self.requests) >= self.rpm:
-                # Calculate minimal wait time
-                oldest_request = min(self.requests)
-                wait_time = 60.01 - (now - oldest_request)  # Minimal buffer
+            if len(self.requests) >= self.effective_rpm:
+                # Calculate wait time to next available slot
+                oldest_request = self.requests[0]
+                wait_time = 60.0 - (now - oldest_request) + 0.1  # Small buffer
                 if wait_time > 0:
-                    logger.debug(f"Rate limit pause: {wait_time:.2f}s")
+                    logger.debug(f"Rate limit wait: {wait_time:.2f}s")
                     time.sleep(wait_time)
                     return self.wait_if_needed()
                     
             self.requests.append(now)
 
+# NEW: Select optimal model based on file size
+def select_optimal_model(duration_seconds: int, language: str = "en") -> Tuple[str, int]:
+    """
+    Select the best model based on file size and language.
+    For very large files, use models with higher rate limits.
+    """
+    if duration_seconds > 14400:  # > 4 hours
+        # Use turbo for better rate limits on massive files
+        return "whisper-large-v3-turbo", 400  # 400 RPM
+    elif duration_seconds > 7200:  # > 2 hours
+        if language == "en":
+            return "distil-whisper-large-v3-en", 100
+        else:
+            return "whisper-large-v3", 300
+    else:
+        # Default selection
+        if language == "en":
+            return "distil-whisper-large-v3-en", 100
+        else:
+            return "whisper-large-v3", 300
+
 def estimate_chunk_size_mb(duration_seconds: int, sample_rate: int = 16000) -> float:
     """Estimate chunk size in MB for FLAC format"""
-    # FLAC compression ratio for speech is typically 50-60%
-    uncompressed_size = duration_seconds * sample_rate * 2  # 16-bit mono
-    compressed_size = uncompressed_size * 0.55  # Conservative estimate
+    uncompressed_size = duration_seconds * sample_rate * 2  
+    compressed_size = uncompressed_size * 0.55  
     return compressed_size / (1024 * 1024)
 
 def calculate_optimal_chunk_duration(file_duration_seconds: int, max_file_size_mb: float = 90) -> int:
     """
     DYNAMIC chunk duration calculator based on video length and Groq dev tier limits.
-    
-    Strategy:
-    - Very short videos (<3 min): Process in ONE chunk (no splitting overhead!)
-    - Short videos (3-10 min): Small chunks for parallelism
-    - Medium videos (10-60 min): Balanced chunks
-    - Long videos (>60 min): Larger chunks to avoid too many API calls
     """
     # VERY SHORT VIDEOS - Process in one gulp!
     if file_duration_seconds <= 180:  # 3 minutes or less
-        # Check if it fits in file size limit (rough estimate)
         estimated_size_mb = (file_duration_seconds * 16000 * 2 * 0.55) / (1024 * 1024)
         if estimated_size_mb < max_file_size_mb:
             logger.info(f"🎯 Short video ({file_duration_seconds}s) - processing in ONE chunk!")
-            return file_duration_seconds  # Return full duration - no splitting!
+            return file_duration_seconds  
     
-    # SHORT VIDEOS (3-10 minutes) - Optimize for parallelism
+    # SHORT VIDEOS (3-10 minutes) 
     if file_duration_seconds <= 600:
-        # Target 5-10 chunks for good parallelism
         target_chunks = min(10, max(5, file_duration_seconds // 60))
         chunk_duration = file_duration_seconds // target_chunks
-        return max(45, chunk_duration)  # At least 45 seconds per chunk
+        return max(45, chunk_duration) 
     
-    # MEDIUM VIDEOS (10-30 minutes) - Balance parallelism and overhead
+    # MEDIUM VIDEOS (10-30 minutes) 
     elif file_duration_seconds <= 1800:
-        # Target 15-20 chunks
         target_chunks = min(20, max(10, file_duration_seconds // 90))
         chunk_duration = file_duration_seconds // target_chunks
-        return max(60, min(120, chunk_duration))  # 60-120 seconds per chunk
+        return max(60, min(120, chunk_duration))  
     
-    # LONG VIDEOS (30-60 minutes) - Larger chunks but still parallel
+    # LONG VIDEOS (30-60 minutes) 
     elif file_duration_seconds <= 3600:
-        # Target 20-30 chunks
         target_chunks = min(30, max(15, file_duration_seconds // 120))
         chunk_duration = file_duration_seconds // target_chunks
-        return max(90, min(180, chunk_duration))  # 90-180 seconds per chunk
+        return max(90, min(180, chunk_duration))  
     
-    # VERY LONG VIDEOS (>60 minutes) - Avoid too many API calls
+    # VERY LONG VIDEOS (>60 minutes)
     else:
-        # Target 30-40 chunks max
-        target_chunks = min(40, max(20, file_duration_seconds // 180))
-        chunk_duration = file_duration_seconds // target_chunks
-        return max(120, min(300, chunk_duration))  # 120-300 seconds per chunk
+        # For 1-4 hour videos: 180-240 second chunks
+        if file_duration_seconds <= 14400:  # Up to 4 hours
+            target_chunks = min(60, max(30, file_duration_seconds // 240))
+            chunk_duration = file_duration_seconds // target_chunks
+            return max(120, min(240, chunk_duration))  
+        # For 4-8 hour videos: 150-200 second chunks (smaller to avoid 503s)
+        elif file_duration_seconds <= 28800:  # Up to 8 hours
+            target_chunks = min(120, max(80, file_duration_seconds // 180))
+            chunk_duration = file_duration_seconds // target_chunks
+            return max(150, min(200, chunk_duration))  
+        # For 8+ hour videos: 120-180 second chunks (even smaller)
+        else:
+            target_chunks = min(150, max(100, file_duration_seconds // 150))
+            chunk_duration = file_duration_seconds // target_chunks
+            return max(120, min(180, chunk_duration))  
 
 def preprocess_audio_ultrafast(input_file: str, output_file: Optional[str] = None) -> Optional[str]:
     """
@@ -176,12 +212,12 @@ def preprocess_audio_ultrafast(input_file: str, output_file: Optional[str] = Non
             "-i", input_file,
             "-ar", str(OPTIMAL_SAMPLE_RATE),
             "-ac", str(OPTIMAL_CHANNELS),
-            "-map", "0:a:0",  # First audio stream only
+            "-map", "0:a:0",  
             "-c:a", "flac",
-            "-compression_level", "0",  # Fastest
-            "-threads", "0",  # Use all CPU cores
+            "-compression_level", "0",  
+            "-threads", "0",  
             "-y",
-            "-loglevel", "error",  # Reduce output
+            "-loglevel", "error",  
             output_file
         ]
         
@@ -245,9 +281,9 @@ def split_audio_ultrafast(file_path: str, chunk_duration_seconds: int,
             # Ultra-fast chunk extraction
             cmd = [
                 "ffmpeg",
-                "-ss", str(pos['start']),  # Seek to start
+                "-ss", str(pos['start']),  
                 "-i", file_path,
-                "-t", str(pos['duration']),  # Duration
+                "-t", str(pos['duration']),  
                 "-ar", str(OPTIMAL_SAMPLE_RATE),
                 "-ac", str(OPTIMAL_CHANNELS),
                 "-c:a", "flac",
@@ -295,105 +331,123 @@ def split_audio_ultrafast(file_path: str, chunk_duration_seconds: int,
         logger.error(f"Error splitting audio: {e}")
         return []
 
+# IMPROVED: Transcribe chunk with better error handling
 def transcribe_chunk_ultrafast(chunk_info: Dict, language: str = "en", 
                              model: str = "distil-whisper-large-v3-en",
-                             rate_limiter: Optional[OptimizedRateLimiter] = None) -> Tuple[int, Optional[str]]:
+                             rate_limiter: Optional[StrictRateLimiter] = None,
+                             max_retries: int = 5) -> Tuple[int, Optional[str]]:
     """
-    Ultra-fast chunk transcription with minimal overhead.
+    Ultra-fast chunk transcription with improved retry logic for 503 errors.
     """
     if groq_client is None:
         return chunk_info["index"], None
     
-    # Rate limiting
-    if rate_limiter:
-        rate_limiter.wait_if_needed()
+    base_delay = 5
+    max_delay = 120  # Cap at 2 minutes
     
-    try:
-        start_time = time.time()
+    for attempt in range(max_retries):
+        # Rate limiting
+        if rate_limiter:
+            rate_limiter.wait_if_needed()
         
-        with open(chunk_info["path"], "rb") as audio_file:
-            transcription = groq_client.audio.transcriptions.create(
-                file=audio_file,
-                model=model,
-                prompt="",  # Empty prompt is faster
-                response_format="text",
-                language=language,
-                temperature=0.0,
-            )
-        
-        elapsed = time.time() - start_time
-        audio_duration = chunk_info["duration_ms"] / 1000
-        speed_factor = audio_duration / elapsed if elapsed > 0 else 0
-        
-        logger.info(f"Chunk {chunk_info['index']}: {elapsed:.2f}s ({speed_factor:.0f}x realtime)")
-        
-        # Immediate cleanup
+        try:
+            start_time = time.time()
+            
+            with open(chunk_info["path"], "rb") as audio_file:
+                transcription = groq_client.audio.transcriptions.create(
+                    file=audio_file,
+                    model=model,
+                    prompt="",  
+                    response_format="text",
+                    language=language,
+                    temperature=0.0,
+                )
+            
+            elapsed = time.time() - start_time
+            audio_duration = chunk_info["duration_ms"] / 1000
+            speed_factor = audio_duration / elapsed if elapsed > 0 else 0
+            
+            logger.info(f"Chunk {chunk_info['index']}: {elapsed:.2f}s ({speed_factor:.0f}x realtime)")
+            
+            # Immediate cleanup on success
+            try:
+                os.remove(chunk_info["path"])
+            except:
+                pass
+                
+            return chunk_info["index"], transcription
+            
+        except Exception as e:
+            error_str = str(e)
+            
+            # Handle 503 Service Unavailable specifically
+            if "503" in error_str or "Service Unavailable" in error_str:
+                # Exponential backoff with jitter
+                wait_time = min(base_delay * (2 ** attempt) + random.uniform(0, 5), max_delay)
+                
+                if attempt < max_retries - 1:
+                    logger.warning(f"Chunk {chunk_info['index']} got 503 (attempt {attempt + 1}), "
+                                 f"waiting {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    
+                    # After multiple 503s, add cooldown
+                    if attempt >= 2:  
+                        logger.info("Adding cooldown period after multiple 503s...")
+                        time.sleep(30)  
+                else:
+                    logger.error(f"Chunk {chunk_info['index']} failed after {max_retries} retries: {e}")
+            else:
+                logger.error(f"Chunk {chunk_info['index']} error: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay)
+                
+        # Cleanup on final failure
         try:
             os.remove(chunk_info["path"])
         except:
             pass
             
-        return chunk_info["index"], transcription
-        
-    except Exception as e:
-        logger.error(f"Chunk {chunk_info['index']} error: {e}")
-        try:
-            os.remove(chunk_info["path"])
-        except:
-            pass
-        return chunk_info["index"], None
+    return chunk_info["index"], None
 
-def transcribe_audio_ultrafast(file_path: str, language: str = "en", fast_mode: bool = True, progress_callback=None) -> Optional[str]:
+def transcribe_audio_ultrafast(file_path: str, language: str = "en", fast_mode: bool = True) -> Optional[str]:
     """
-    Ultra-fast audio transcription optimized for Groq dev tier.
-    
-    Args:
-        file_path: Path to audio file
-        language: Language code (default: "en")
-        fast_mode: Use maximum speed optimizations (default: True)
-        progress_callback: Optional callback function(stage, progress, message) for progress updates
+    Ultra-fast audio transcription optimized for Groq dev tier with improved large file handling.
     """
     try:
         total_start = time.time()
         
-        # Select optimal model
-        model = "distil-whisper-large-v3-en" if language == "en" else "whisper-large-v3-turbo"
-        rpm_limit = GROQ_RPM_DEV.get(model, 100)
-        
-        logger.info(f"🚀 Starting ULTRA-FAST transcription with {model}")
-        logger.info(f"   Rate limit: {rpm_limit} RPM, Fast mode: {fast_mode}")
-        
         # Preprocess audio
         logger.info("⚡ Preprocessing audio...")
-        if progress_callback:
-            progress_callback("preprocessing", 0.0, "⚡ Preprocessing audio...")
-        
         preprocessed_file = preprocess_audio_ultrafast(file_path)
         if not preprocessed_file:
             return None
-        
-        if progress_callback:
-            progress_callback("preprocessing", 1.0, "✅ Audio preprocessing complete")
         
         # Get duration and calculate optimal chunk size
         audio = AudioSegment.from_file(preprocessed_file)
         duration_seconds = len(audio) // 1000
         
+        # Select optimal model based on file size
+        model, rpm_limit = select_optimal_model(duration_seconds, language)
+        
+        logger.info(f"🚀 Starting transcription with {model}")
+        logger.info(f"   Rate limit: {rpm_limit} RPM, Fast mode: {fast_mode}")
+        
+        # Special handling for MASSIVE videos
+        if duration_seconds > 14400:  # Over 4 hours
+            hours = duration_seconds / 3600
+            logger.warning(f"⚠️  MASSIVE VIDEO DETECTED: {hours:.1f} hours!")
+            logger.info("   Using conservative settings to avoid service errors...")
+            logger.info("   This may take some time, but it will complete!")
+        
         # Calculate optimal approach
         optimal_chunk_duration = calculate_optimal_chunk_duration(duration_seconds)
         
-        # Check if we should process in one chunk (no splitting!)
+        # Check if we should process in one chunk 
         if optimal_chunk_duration >= duration_seconds:
             logger.info(f"⚡ Processing entire {duration_seconds}s video in ONE request!")
             
-            if progress_callback:
-                progress_callback("transcribing", 0.0, f"⚡ Processing entire {duration_seconds}s audio in ONE request!")
-            
-            # No splitting needed - direct transcription
-            transcription_start = time.time()
-            
             # Create rate limiter
-            rate_limiter = OptimizedRateLimiter(rpm_limit)
+            rate_limiter = StrictRateLimiter(rpm_limit, conservative=False)
             
             # Single transcription
             file_size_mb = os.path.getsize(preprocessed_file) / (1024 * 1024)
@@ -406,12 +460,7 @@ def transcribe_audio_ultrafast(file_path: str, language: str = "en", fast_mode: 
                 "index": 1
             }
             
-            _, transcription = transcribe_chunk_ultrafast(chunk_info, language, model, rate_limiter)
-            
-            transcription_time = time.time() - transcription_start
-            
-            if progress_callback:
-                progress_callback("transcribing", 1.0, "✅ Transcription complete!")
+            _, transcription = transcribe_chunk_ultrafast(chunk_info, language, model, rate_limiter, max_retries=5)
             
             if not transcription:
                 logger.error("Failed to transcribe audio")
@@ -426,7 +475,6 @@ def transcribe_audio_ultrafast(file_path: str, language: str = "en", fast_mode: 
             logger.info(f"📝 Audio duration: {duration_seconds}s ({duration_seconds/60:.1f} min)")
             logger.info(f"⚡ Total time: {total_time:.2f}s")
             logger.info(f"🚀 Speed: {speed_factor:.1f}x realtime")
-            logger.info(f"🎯 Processed in ONE request - maximum efficiency!")
             logger.info("=" * 60)
             
             return transcription
@@ -436,50 +484,29 @@ def transcribe_audio_ultrafast(file_path: str, language: str = "en", fast_mode: 
         
         # Split audio
         split_start = time.time()
-        if progress_callback:
-            progress_callback("chunking", 0.0, f"✂️ Splitting audio into {optimal_chunk_duration}s chunks...")
-        
-        overlap = 0.5 if fast_mode else 1.0  # Minimal overlap for speed
+        overlap = 0.5 if fast_mode else 1.0  
         chunks = split_audio_ultrafast(preprocessed_file, optimal_chunk_duration, overlap)
         split_time = time.time() - split_start
         
         logger.info(f"✂️  Split into {len(chunks)} chunks in {split_time:.2f}s")
-        if progress_callback:
-            progress_callback("chunking", 1.0, f"✅ Split into {len(chunks)} chunks")
-        
-        # Log the chunking strategy for transparency
-        if len(chunks) == 1:
-            logger.info(f"📌 Strategy: Single chunk (no parallelism needed)")
-        elif len(chunks) <= 5:
-            logger.info(f"📌 Strategy: Few chunks ({len(chunks)}) for simple parallelism")
-        elif len(chunks) <= 20:
-            logger.info(f"📌 Strategy: Moderate chunks ({len(chunks)}) for balanced parallelism")
-        else:
-            logger.info(f"📌 Strategy: Many chunks ({len(chunks)}) for maximum parallelism")
         
         # Cleanup preprocessed file early
         if preprocessed_file != file_path and os.path.exists(preprocessed_file):
             os.remove(preprocessed_file)
         
-        # Create rate limiter
-        rate_limiter = OptimizedRateLimiter(rpm_limit)
+        # Create rate limiter - be conservative for large files
+        conservative = duration_seconds > 7200  # 2+ hours
+        rate_limiter = StrictRateLimiter(rpm_limit, conservative=conservative)
         
-        # ULTRA-FAST PARALLEL TRANSCRIPTION
-        transcription_start = time.time()
-        transcriptions = {}
-        
-        # Determine optimal worker count
-        # Don't limit by chunk count - we want maximum parallelism!
-        optimal_workers = min(
-            MAX_CONCURRENT_REQUESTS,
-            rpm_limit // 6,  # Leave headroom for rate limits
-            30  # Practical limit for most systems
-        )
-        
-        # But ensure we have at least as many workers as chunks
-        optimal_workers = max(optimal_workers, min(len(chunks), 20))
+        # Calculate optimal workers - CONSERVATIVE FOR LARGE FILES
+        optimal_workers = calculate_workers_for_file_size(duration_seconds, rpm_limit)
         
         logger.info(f"🔥 Transcribing with {optimal_workers} parallel workers...")
+        
+        # PARALLEL TRANSCRIPTION WITH BETTER ERROR HANDLING
+        transcription_start = time.time()
+        transcriptions = {}
+        failed_chunks = []
         
         with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
             # Submit all chunks
@@ -489,7 +516,8 @@ def transcribe_audio_ultrafast(file_path: str, language: str = "en", fast_mode: 
                     chunk, 
                     language, 
                     model,
-                    rate_limiter
+                    rate_limiter,
+                    max_retries=5
                 ): chunk for chunk in chunks
             }
             
@@ -501,20 +529,39 @@ def transcribe_audio_ultrafast(file_path: str, language: str = "en", fast_mode: 
                 
                 if transcription:
                     transcriptions[chunk_index] = transcription
+                else:
+                    failed_chunks.append(chunk_index)
+                    logger.warning(f"Failed chunk: {chunk_index}")
                     
-                # Progress update
-                progress = completed / len(chunks)
-                if progress_callback:
-                    elapsed = time.time() - transcription_start
-                    eta = (elapsed / completed) * (len(chunks) - completed) if completed > 0 else 0
-                    progress_callback("transcribing", progress, 
-                                    f"🎯 Transcribing: {progress*100:.0f}% ({completed}/{len(chunks)}) ETA: {eta:.1f}s")
-                
-                # Log update every 25%
+                # Progress update 
+                progress = completed / len(chunks) * 100
                 if completed % max(1, len(chunks) // 4) == 0:
-                    logger.info(f"   Progress: {progress*100:.0f}% ({completed}/{len(chunks)}) ETA: {eta:.1f}s")
+                    elapsed = time.time() - transcription_start
+                    eta = (elapsed / completed) * (len(chunks) - completed)
+                    logger.info(f"   Progress: {progress:.0f}% ({completed}/{len(chunks)}) ETA: {eta:.1f}s")
+                    
+                    # Add cooldown if high failure rate
+                    if len(failed_chunks) > len(chunks) * 0.1:  # >10% failure
+                        logger.warning("High failure rate detected, adding cooldown...")
+                        time.sleep(30)
         
         transcription_time = time.time() - transcription_start
+        
+        # Retry failed chunks with even more conservative settings
+        if failed_chunks:
+            logger.warning(f"Retrying {len(failed_chunks)} failed chunks...")
+            time.sleep(60)  # Wait 1 minute before retrying
+            
+            # Retry with only 1 worker and longer delays
+            retry_rate_limiter = StrictRateLimiter(rpm_limit // 2, conservative=True)
+            
+            for chunk_index in failed_chunks:
+                chunk = next(c for c in chunks if c["index"] == chunk_index)
+                _, transcription = transcribe_chunk_ultrafast(
+                    chunk, language, model, retry_rate_limiter, max_retries=3
+                )
+                if transcription:
+                    transcriptions[chunk_index] = transcription
         
         # Combine transcriptions
         full_transcription = " ".join(
@@ -525,6 +572,7 @@ def transcribe_audio_ultrafast(file_path: str, language: str = "en", fast_mode: 
         total_time = time.time() - total_start
         actual_speed_factor = duration_seconds / total_time if total_time > 0 else 0
         transcription_speed = duration_seconds / transcription_time if transcription_time > 0 else 0
+        success_rate = len(transcriptions) / len(chunks) * 100
         
         # Performance report
         logger.info("=" * 60)
@@ -536,7 +584,7 @@ def transcribe_audio_ultrafast(file_path: str, language: str = "en", fast_mode: 
         logger.info(f"📊 Preprocessing time: {split_time:.2f} seconds")
         logger.info(f"🔥 Overall speed: {actual_speed_factor:.1f}x realtime")
         logger.info(f"💨 Transcription speed: {transcription_speed:.1f}x realtime")
-        logger.info(f"✅ Success rate: {len(transcriptions)}/{len(chunks)} chunks")
+        logger.info(f"✅ Success rate: {success_rate:.1f}% ({len(transcriptions)}/{len(chunks)} chunks)")
         logger.info("=" * 60)
         
         return full_transcription
@@ -550,8 +598,17 @@ def transcribe_audio_from_file(file_path: str, language: str = "en", progress_ca
     """
     Backward compatible ultra-fast transcription.
     Uses fast mode by default for maximum speed!
+    
+    Args:
+        file_path: Path to audio file
+        language: Language code (default: "en")
+        progress_callback: Optional callback for progress updates (for compatibility)
     """
-    return transcribe_audio_ultrafast(file_path, language, fast_mode=True, progress_callback=progress_callback)
+    # Log if progress_callback was provided (we don't use it in the optimized version)
+    if progress_callback:
+        logger.info("Note: progress_callback provided but not used in optimized transcription")
+    
+    return transcribe_audio_ultrafast(file_path, language, fast_mode=True)
 
 # Performance testing function
 def benchmark_transcription(file_path: str):

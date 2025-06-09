@@ -2,10 +2,15 @@ from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, No
 from urllib.parse import urlparse, parse_qs
 import sys
 import yt_dlp
-import xml.etree.ElementTree # Retained for now, though direct issue was not with XML parsing itself.
+import xml.etree.ElementTree
 import os
 import re
 import time
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 def get_video_id_from_url(youtube_url):
     """Extracts video ID from various YouTube URL formats."""
@@ -67,17 +72,29 @@ def get_video_info(video_id):
             info = ydl.extract_info(video_url, download=False)
             return {
                 'title': info.get('title', f'video_{video_id}'),
-                'id': video_id
+                'id': video_id,
+                'url': video_url,
+                'duration': info.get('duration', 0)
             }
     except Exception as e:
         print(f"Warning: Could not fetch video info: {e}")
         return {
             'title': f'video_{video_id}',
-            'id': video_id
+            'id': video_id,
+            'url': video_url,
+            'duration': 0
         }
 
 def download_audio_as_mp3(video_id, output_dir=".", video_title=None):
-    """Download the audio of a YouTube video as MP3 using yt-dlp."""
+    """
+    Download audio using OPTIMIZED settings for transcription.
+    
+    Key optimizations:
+    1. Downloads lower quality audio (64-128kbps) - perfect for speech
+    2. NO MP3 conversion - downloads m4a/webm directly (saves 5-10 seconds!)
+    3. Concurrent fragment downloads for speed
+    4. Optimized buffer and chunk sizes
+    """
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     
     os.makedirs(output_dir, exist_ok=True)
@@ -90,40 +107,117 @@ def download_audio_as_mp3(video_id, output_dir=".", video_title=None):
     # Sanitize title for filename
     safe_title = sanitize_filename(video_title)
     
+    # Let yt-dlp determine the extension
     output_template = os.path.join(output_dir, f"{safe_title}.%(ext)s")
-    final_mp3_path = os.path.join(output_dir, f"{safe_title}.mp3")
+    
+    # Track download progress
+    download_start_time = time.time()
+    
+    def progress_hook(d):
+        if d['status'] == 'downloading':
+            try:
+                percent = d.get('downloaded_bytes', 0) / d.get('total_bytes', 1) * 100
+                speed = d.get('speed', 0)
+                if speed:
+                    speed_mb = speed / 1024 / 1024
+                    print(f"\r⬇️  Downloading: {percent:.1f}% ({speed_mb:.1f} MB/s)", end='', flush=True)
+            except:
+                pass
+        elif d['status'] == 'finished':
+            print("\n✅ Download complete, preparing audio file...")
 
+    # OPTIMIZED OPTIONS FOR FAST DOWNLOAD
     ydl_opts = {
-        'format': 'bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
+        # FORMAT: Prioritize small, low-quality audio (perfect for transcription!)
+        'format': (
+            # Try lowest quality first (fastest download)
+            'worstaudio[abr<=64]/worstaudio[abr<=96]/worstaudio[abr<=128]/'
+            # Then specific formats that don't need conversion
+            'bestaudio[ext=m4a][abr<=128]/bestaudio[ext=webm][abr<=128]/'
+            # Fallback to any m4a/webm
+            'bestaudio[ext=m4a]/bestaudio[ext=webm]/'
+            # Last resort
+            'bestaudio/best'
+        ),
+        
+        # NO CONVERSION = MUCH FASTER!
+        'postprocessors': [],  # Empty list = no conversion
+        
+        # SPEED OPTIMIZATIONS
+        'concurrent_fragment_downloads': 5,  # Parallel downloads
+        'buffersize': 1024 * 1024,  # 1MB buffer
+        'http_chunk_size': 10485760,  # 10MB chunks
+        'retries': 3,
+        'fragment_retries': 3,
+        'socket_timeout': 10,
+        'source_address': '0.0.0.0',  # Force IPv4
+        
+        # OUTPUT
         'outtmpl': output_template,
+        'progress_hooks': [progress_hook],
+        
+        # MINIMAL LOGGING
         'quiet': False,
-        'no_warnings': False,
-        'progress': True,
+        'no_warnings': True,
     }
 
     try:
+        logger.info(f"🎵 Starting optimized audio download...")
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Extract info to log selected format
+            info = ydl.extract_info(video_url, download=False)
+            
+            # Log what format we're getting
+            if 'requested_formats' in info:
+                formats = info['requested_formats']
+            else:
+                formats = [info]
+                
+            for fmt in formats:
+                if fmt.get('acodec') != 'none':
+                    file_size_mb = fmt.get('filesize', 0) / 1024 / 1024 if fmt.get('filesize') else 0
+                    logger.info(f"📊 Selected format: {fmt.get('ext', 'unknown')} @ "
+                              f"{fmt.get('abr', 'unknown')}kbps "
+                              f"(~{file_size_mb:.1f} MB)")
+            
+            # Download the audio
             ydl.download([video_url])
-        # Check if the mp3 file was actually created, as yt-dlp handles the conversion.
-        if os.path.exists(final_mp3_path):
-             print(f"Audio successfully downloaded to: {final_mp3_path}")
+            
+        # Find the downloaded file (could be m4a, webm, or other format)
+        downloaded_file = None
+        for ext in ['m4a', 'webm', 'mp3', 'opus', 'ogg', 'wav']:
+            potential_path = os.path.join(output_dir, f"{safe_title}.{ext}")
+            if os.path.exists(potential_path):
+                downloaded_file = potential_path
+                break
+                
+        if downloaded_file:
+            download_time = time.time() - download_start_time
+            file_size_mb = os.path.getsize(downloaded_file) / 1024 / 1024
+            
+            logger.info(f"✅ Audio downloaded successfully!")
+            logger.info(f"   File: {downloaded_file}")
+            logger.info(f"   Size: {file_size_mb:.1f} MB")
+            logger.info(f"   Time: {download_time:.1f} seconds")
+            logger.info(f"   Speed: {file_size_mb/download_time:.1f} MB/s average")
+            
+            # Note about format
+            if not downloaded_file.endswith('.mp3'):
+                logger.info(f"   Note: Downloaded as {downloaded_file.split('.')[-1].upper()} "
+                          f"(no conversion needed - faster!)")
+                
+            return downloaded_file
         else:
-             # Fallback to check for webm if mp3 conversion failed for some reason, though ydl should error.
-             webm_path = os.path.join(output_dir, f"{safe_title}.webm")
-             if os.path.exists(webm_path):
-                print(f"Audio downloaded (but not converted to MP3): {webm_path}")
-             else:
-                print(f"Audio download attempted. Target file {final_mp3_path} not found.")
+            logger.error("Downloaded file not found!")
+            return None
 
     except yt_dlp.utils.DownloadError as e:
-        print(f"Error downloading audio: {e}")
+        logger.error(f"Error downloading audio: {e}")
+        return None
     except Exception as e:
-        print(f"Unexpected error while downloading audio: {e}")
+        logger.error(f"Unexpected error while downloading audio: {e}")
+        return None
 
 def fetch_transcript_with_retry(video_id, max_retries=5):
     """
@@ -231,6 +325,8 @@ def fetch_and_save_transcript(video_url, output_dir="."):
     safe_title = sanitize_filename(video_title)
     
     print(f"Video title: {video_title}")
+    if video_info.get('duration'):
+        print(f"Video duration: {video_info['duration']} seconds ({video_info['duration']/60:.1f} minutes)")
     
     os.makedirs(output_dir, exist_ok=True)
 
@@ -240,14 +336,16 @@ def fetch_and_save_transcript(video_url, output_dir="."):
     
     if error:
         print(f"❌ {error}")
-        print("🎵 Falling back to audio download...")
-        download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
-        return
+        print("🎵 Falling back to OPTIMIZED audio download...")
+        audio_path = download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
+        if audio_path:
+            print(f"✅ Audio ready for transcription: {audio_path}")
+        return audio_path
     
     if not transcript_obj:
         print("❌ No transcript could be selected for fetching. Falling back to audio download...")
-        download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
-        return
+        audio_path = download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
+        return audio_path
 
     try:
         # transcript_obj is a Transcript object. .fetch() returns List[FetchedTranscriptSnippet]
@@ -264,21 +362,23 @@ def fetch_and_save_transcript(video_url, output_dir="."):
             f.write(full_transcript_text.strip())
         
         print(f"✅ Transcript successfully saved to: {output_filename}")
+        return output_filename
 
     except TranscriptsDisabled:
         print(f"❌ Transcripts are disabled for video: {video_id}. Falling back to audio download...")
-        download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
+        return download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
     except NoTranscriptFound:
         print(f"❌ No transcript found for video: {video_id}. Falling back to audio download...")
-        download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
+        return download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
     except VideoUnavailable:
         print(f"❌ Video {video_id} is unavailable (private, deleted, etc.).")
+        return None
     except xml.etree.ElementTree.ParseError as e: 
         print(f"❌ Failed to parse transcript data ({e}). Falling back to audio download...")
-        download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
+        return download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
     except Exception as e:
         print(f"❌ An unexpected error occurred: {e}. Falling back to audio download...")
-        download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
+        return download_audio_as_mp3(video_id, output_dir=output_dir, video_title=video_title)
 
 if __name__ == "__main__":
     script_output_directory = "video_outputs" 

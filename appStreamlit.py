@@ -459,29 +459,31 @@ st.subheader("Choose Transcription Method")
 # Custom CSS for orange Groq button
 st.markdown("""
 <style>
-div.stButton > button:first-child {
-    background-color: white;
-    color: black;
-    border: 1px solid #ccc;
+/* Style primary buttons with orange Groq theme */
+div.stButton > button[data-testid="baseButton-primary"] {
+    background-color: #FF6B35 !important;
+    color: white !important;
+    border: 1px solid #FF6B35 !important;
+    font-weight: bold !important;
 }
 
-div[data-testid="column"]:nth-of-type(2) div.stButton > button:first-child {
-    background-color: #FF6B35;
-    color: white;
-    border: 1px solid #FF6B35;
-    font-weight: bold;
+div.stButton > button[data-testid="baseButton-primary"]:hover {
+    background-color: #E85A2B !important;
+    border: 1px solid #E85A2B !important;
+    color: white !important;
 }
 
-div[data-testid="column"]:nth-of-type(2) div.stButton > button:first-child:hover {
-    background-color: #E85A2B;
-    border: 1px solid #E85A2B;
-    color: white;
+div.stButton > button[data-testid="baseButton-primary"]:active {
+    background-color: #D94F24 !important;
+    border: 1px solid #D94F24 !important;
+    color: white !important;
 }
 
-div[data-testid="column"]:nth-of-type(2) div.stButton > button:first-child:active {
-    background-color: #D94F24;
-    border: 1px solid #D94F24;
-    color: white;
+div.stButton > button[data-testid="baseButton-primary"]:focus {
+    background-color: #FF6B35 !important;
+    border: 1px solid #FF6B35 !important;
+    color: white !important;
+    box-shadow: 0 0 0 0.2rem rgba(255, 107, 53, 0.25) !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -489,11 +491,14 @@ div[data-testid="column"]:nth-of-type(2) div.stButton > button:first-child:activ
 col1, col2 = st.columns(2)
 
 with col1:
-    unofficial_button = st.button("📝 Unofficial Transcripts", use_container_width=True, 
+    unofficial_button = st.button("📝 Unofficial Transcripts", 
+                                 use_container_width=True, 
                                  help="Fetches existing YouTube transcripts (auto-generated or manual)")
     
 with col2:
-    groq_button = st.button("⚡ Groq AI Transcription", use_container_width=True,
+    groq_button = st.button("⚡ Groq AI Transcription", 
+                           type="primary",
+                           use_container_width=True,
                            help="Downloads audio and transcribes using Groq Dev Tier (super fast!)")
 
 # Handle button clicks
