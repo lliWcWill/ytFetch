@@ -87,13 +87,7 @@ def get_video_info(video_id):
 
 def download_audio_as_mp3(video_id, output_dir=".", video_title=None):
     """
-    Download audio using OPTIMIZED settings for transcription.
-    
-    Key optimizations:
-    1. Downloads lower quality audio (64-128kbps) - perfect for speech
-    2. NO MP3 conversion - downloads m4a/webm directly (saves 5-10 seconds!)
-    3. Concurrent fragment downloads for speed
-    4. Optimized buffer and chunk sizes
+    Download audio using subprocess to avoid yt-dlp progress bug.
     """
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     
@@ -110,113 +104,150 @@ def download_audio_as_mp3(video_id, output_dir=".", video_title=None):
     # Let yt-dlp determine the extension
     output_template = os.path.join(output_dir, f"{safe_title}.%(ext)s")
     
-    # Track download progress
+    logger.info(f"🎵 Starting audio download for: {video_title}")
+    print("⬇️  Downloading audio (this may take a moment)...")
+    
     download_start_time = time.time()
     
-    def progress_hook(d):
-        if d['status'] == 'downloading':
-            try:
-                percent = d.get('downloaded_bytes', 0) / d.get('total_bytes', 1) * 100
-                speed = d.get('speed', 0)
-                if speed:
-                    speed_mb = speed / 1024 / 1024
-                    print(f"\r⬇️  Downloading: {percent:.1f}% ({speed_mb:.1f} MB/s)", end='', flush=True)
-            except:
-                pass
-        elif d['status'] == 'finished':
-            print("\n✅ Download complete, preparing audio file...")
-
-    # OPTIMIZED OPTIONS FOR FAST DOWNLOAD
-    ydl_opts = {
-        # FORMAT: Prioritize small, low-quality audio (perfect for transcription!)
-        'format': (
-            # Try lowest quality first (fastest download)
-            'worstaudio[abr<=64]/worstaudio[abr<=96]/worstaudio[abr<=128]/'
-            # Then specific formats that don't need conversion
-            'bestaudio[ext=m4a][abr<=128]/bestaudio[ext=webm][abr<=128]/'
-            # Fallback to any m4a/webm
-            'bestaudio[ext=m4a]/bestaudio[ext=webm]/'
-            # Last resort
-            'bestaudio/best'
-        ),
-        
-        # NO CONVERSION = MUCH FASTER!
-        'postprocessors': [],  # Empty list = no conversion
-        
-        # SPEED OPTIMIZATIONS
-        'concurrent_fragment_downloads': 5,  # Parallel downloads
-        'buffersize': 1024 * 1024,  # 1MB buffer
-        'http_chunk_size': 10485760,  # 10MB chunks
-        'retries': 3,
-        'fragment_retries': 3,
-        'socket_timeout': 10,
-        'source_address': '0.0.0.0',  # Force IPv4
-        
-        # OUTPUT
-        'outtmpl': output_template,
-        'progress_hooks': [progress_hook],
-        
-        # MINIMAL LOGGING
-        'quiet': False,
-        'no_warnings': True,
-    }
-
+    # Use subprocess to completely avoid the Python API bug
+    import subprocess
+    import sys
+    
+    # Build command
+    cmd = [
+        sys.executable, '-m', 'yt_dlp',
+        # Format selection - prioritize non-fragmented formats
+        '-f', 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio[protocol^=http][protocol!*=dash]/bestaudio',
+        # Completely disable progress to avoid the bug
+        '--no-progress',
+        '--quiet',
+        '--no-warnings',
+        # Ensure single video only
+        '--no-playlist',
+        # Output
+        '-o', output_template,
+        # Additional options
+        '--socket-timeout', '30',
+        '--retries', '10',
+        '--fragment-retries', '10',
+        # URL
+        video_url
+    ]
+    
+    # Add cookies if available
+    if os.path.exists('cookies.txt'):
+        cmd.extend(['--cookies', 'cookies.txt'])
+    
     try:
-        logger.info(f"🎵 Starting optimized audio download...")
+        # Run the command with output suppression
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8',
+            errors='ignore'  # Ignore encoding errors
+        )
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Extract info to log selected format
-            info = ydl.extract_info(video_url, download=False)
-            
-            # Log what format we're getting
-            if 'requested_formats' in info:
-                formats = info['requested_formats']
+        if result.returncode != 0:
+            # Check if it's the specific progress error
+            if "Progress Value has invalid value" in result.stderr or "1024.000000" in result.stderr:
+                logger.warning("Encountered progress bug, retrying with different format...")
+                
+                # Retry with explicit format IDs that are known to be non-fragmented
+                format_ids = ['140', '139', '251', '171', '141']  # Common non-fragmented audio formats
+                
+                for fmt_id in format_ids:
+                    logger.info(f"Trying format ID: {fmt_id}")
+                    
+                    retry_cmd = cmd.copy()
+                    retry_cmd[2] = fmt_id  # Replace format selection
+                    
+                    retry_result = subprocess.run(
+                        retry_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding='utf-8',
+                        errors='ignore'
+                    )
+                    
+                    if retry_result.returncode == 0:
+                        print("✅ Download complete!")
+                        break
+                    elif "requested format not available" in retry_result.stderr.lower():
+                        continue
+                    else:
+                        logger.debug(f"Format {fmt_id} failed: {retry_result.stderr[:100]}")
+                else:
+                    # All formats failed
+                    logger.error("All format attempts failed")
+                    logger.error(f"Last error: {retry_result.stderr}")
+                    return None
             else:
-                formats = [info]
-                
-            for fmt in formats:
-                if fmt.get('acodec') != 'none':
-                    file_size_mb = fmt.get('filesize', 0) / 1024 / 1024 if fmt.get('filesize') else 0
-                    logger.info(f"📊 Selected format: {fmt.get('ext', 'unknown')} @ "
-                              f"{fmt.get('abr', 'unknown')}kbps "
-                              f"(~{file_size_mb:.1f} MB)")
-            
-            # Download the audio
-            ydl.download([video_url])
-            
-        # Find the downloaded file (could be m4a, webm, or other format)
-        downloaded_file = None
-        for ext in ['m4a', 'webm', 'mp3', 'opus', 'ogg', 'wav']:
-            potential_path = os.path.join(output_dir, f"{safe_title}.{ext}")
-            if os.path.exists(potential_path):
-                downloaded_file = potential_path
-                break
-                
-        if downloaded_file:
-            download_time = time.time() - download_start_time
-            file_size_mb = os.path.getsize(downloaded_file) / 1024 / 1024
-            
-            logger.info(f"✅ Audio downloaded successfully!")
-            logger.info(f"   File: {downloaded_file}")
-            logger.info(f"   Size: {file_size_mb:.1f} MB")
-            logger.info(f"   Time: {download_time:.1f} seconds")
-            logger.info(f"   Speed: {file_size_mb/download_time:.1f} MB/s average")
-            
-            # Note about format
-            if not downloaded_file.endswith('.mp3'):
-                logger.info(f"   Note: Downloaded as {downloaded_file.split('.')[-1].upper()} "
-                          f"(no conversion needed - faster!)")
-                
-            return downloaded_file
+                logger.error(f"Download failed: {result.stderr}")
+                return None
         else:
-            logger.error("Downloaded file not found!")
-            return None
-
-    except yt_dlp.utils.DownloadError as e:
-        logger.error(f"Error downloading audio: {e}")
+            print("✅ Download complete!")
+            
+    except subprocess.TimeoutExpired:
+        logger.error("Download timed out")
         return None
     except Exception as e:
-        logger.error(f"Unexpected error while downloading audio: {e}")
+        logger.error(f"Subprocess error: {e}")
+        return None
+    
+    # Find the downloaded file
+    downloaded_file = None
+    for ext in ['m4a', 'mp3', 'webm', 'opus', 'ogg', 'wav']:
+        potential_path = os.path.join(output_dir, f"{safe_title}.{ext}")
+        if os.path.exists(potential_path):
+            downloaded_file = potential_path
+            break
+            
+    if downloaded_file:
+        download_time = time.time() - download_start_time
+        file_size_mb = os.path.getsize(downloaded_file) / 1024 / 1024
+        
+        logger.info(f"✅ Audio downloaded successfully!")
+        logger.info(f"   File: {downloaded_file}")
+        logger.info(f"   Size: {file_size_mb:.1f} MB")
+        logger.info(f"   Time: {download_time:.1f} seconds")
+        logger.info(f"   Speed: {file_size_mb/download_time:.1f} MB/s average")
+        
+        if not downloaded_file.endswith('.mp3'):
+            logger.info(f"   Note: Downloaded as {downloaded_file.split('.')[-1].upper()} "
+                      f"(no conversion needed - faster!)")
+            
+        return downloaded_file
+    else:
+        logger.error("Downloaded file not found!")
+        
+        # Last attempt: Use system yt-dlp if available
+        logger.info("Trying system yt-dlp command...")
+        try:
+            simple_cmd = [
+                'yt-dlp',
+                '-x',  # Extract audio
+                '--audio-format', 'best',
+                '--no-progress',
+                '-q',  # Quiet
+                '-o', output_template,
+                video_url
+            ]
+            
+            subprocess.run(simple_cmd, check=True, capture_output=True)
+            
+            # Check again
+            for ext in ['m4a', 'mp3', 'webm', 'opus', 'ogg', 'wav']:
+                potential_path = os.path.join(output_dir, f"{safe_title}.{ext}")
+                if os.path.exists(potential_path):
+                    print("✅ Download complete via system yt-dlp!")
+                    return potential_path
+                    
+        except Exception:
+            pass
+            
         return None
 
 def fetch_transcript_with_retry(video_id, max_retries=5):

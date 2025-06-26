@@ -48,3 +48,5 @@ audio_*.mp3
 transcript_*.txt
 *_processed.flac
 
+#video
+video_outputs/

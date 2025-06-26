@@ -501,6 +501,10 @@ with col2:
                            use_container_width=True,
                            help="Downloads audio and transcribes using Groq Dev Tier (super fast!)")
 
+# TODO: Update Streamlit UI to show real-time progress tracking for Groq transcription method
+# Current Groq method uses background transcription without UI progress updates
+# Need to integrate with the improved audio_transcriber.py progress callbacks
+
 # Handle button clicks
 if unofficial_button or groq_button:
     print(f"\n🎬 DEBUG: ===== SUBMIT BUTTON PRESSED =====")
