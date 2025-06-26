@@ -6,7 +6,6 @@ import subprocess
 import time
 from pathlib import Path
 from pydub import AudioSegment
-import yaml
 import tempfile
 from groq import Groq
 import openai
@@ -17,9 +16,15 @@ import multiprocessing
 from typing import List, Dict, Tuple, Optional
 import random  # Add this import
 
+# Import the new config loader
+from config_loader import load_config, get_api_key, get_performance_config, get_model_config
+
 # Initialize logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Load performance configuration
+perf_config = get_performance_config()
 
 # UPDATED CONSTANTS FOR BETTER LARGE FILE HANDLING
 MAX_FILE_SIZE_MB = 100  # Dev tier limit
@@ -27,8 +32,11 @@ MAX_CHUNK_SIZE_MB = 90  # Leave headroom for FLAC metadata
 CHUNK_OVERLAP_SECONDS = 0.5  # Minimal overlap for maximum speed
 CHUNK_DURATION_SECONDS = 60  # Default 60s for more parallelism!
 
-# CONSERVATIVE CONCURRENCY FOR LARGE FILES
-MAX_CONCURRENT_REQUESTS = min(50, multiprocessing.cpu_count() * 5)  
+# CONSERVATIVE CONCURRENCY FOR LARGE FILES - Use config or defaults
+MAX_CONCURRENT_REQUESTS = min(
+    perf_config.get("max_concurrent_requests", 50), 
+    multiprocessing.cpu_count() * 5
+)  
 BATCH_SIZE = 10  
 
 # Dev tier rate limits
@@ -40,39 +48,29 @@ GROQ_RPM_DEV = {
 
 # Audio processing optimization
 OPTIMAL_SAMPLE_RATE = 16000  
-OPTIMAL_CHANNELS = 1  
-
-def load_config():
-    """Load configuration from config.yaml file"""
-    try:
-        with open("config.yaml", "r") as file:
-            return yaml.safe_load(file)
-    except FileNotFoundError:
-        logger.error("config.yaml file not found. Please create it with your API keys.")
-        return None
-    except yaml.YAMLError:
-        logger.error("Error parsing config.yaml. Please check its format.")
-        return None
+OPTIMAL_CHANNELS = 1
 
 def initialize_clients():
-    """Initialize the API clients with keys from config"""
-    config = load_config()
-    if not config:
-        return None, None
+    """Initialize the API clients with keys from config or Streamlit secrets"""
+    # Get API keys using the new config loader
+    groq_api_key = get_api_key("groq")
+    openai_api_key = get_api_key("openai")
     
-    groq_api_key = config.get("groq", {}).get("api_key")
-    if not groq_api_key or groq_api_key == "YOUR_GROQ_API_KEY_HERE":
-        logger.warning("Groq API key is missing or invalid in config.yaml.")
+    # Initialize Groq client
+    if not groq_api_key:
+        logger.warning("Groq API key not found in config or secrets.")
         groq_client = None
     else:
         groq_client = Groq(api_key=groq_api_key)
+        logger.info("Groq client initialized successfully")
         
-    openai_api_key = config.get("openai", {}).get("api_key")
-    if not openai_api_key or openai_api_key == "YOUR_OPENAI_API_KEY_HERE":
-        logger.warning("OpenAI API key is missing or invalid in config.yaml.")
+    # Initialize OpenAI client
+    if not openai_api_key:
+        logger.warning("OpenAI API key not found in config or secrets.")
         openai_client = None
     else:
         openai_client = openai.OpenAI(api_key=openai_api_key)
+        logger.info("OpenAI client initialized successfully")
         
     return groq_client, openai_client
 
@@ -129,20 +127,28 @@ def select_optimal_model(duration_seconds: int, language: str = "en") -> Tuple[s
     Select the best model based on file size and language.
     For very large files, use models with higher rate limits.
     """
+    # Get model preferences from config
+    model_config = get_model_config()
+    
     if duration_seconds > 14400:  # > 4 hours
         # Use turbo for better rate limits on massive files
-        return "whisper-large-v3-turbo", 400  # 400 RPM
+        large_file_model = model_config.get("large_file_model", "whisper-large-v3-turbo")
+        return large_file_model, GROQ_RPM_DEV.get(large_file_model, 400)
     elif duration_seconds > 7200:  # > 2 hours
         if language == "en":
-            return "distil-whisper-large-v3-en", 100
+            default_model = model_config.get("default", "distil-whisper-large-v3-en")
+            return default_model, GROQ_RPM_DEV.get(default_model, 100)
         else:
-            return "whisper-large-v3", 300
+            fallback_model = model_config.get("fallback", "whisper-large-v3")
+            return fallback_model, GROQ_RPM_DEV.get(fallback_model, 300)
     else:
         # Default selection
         if language == "en":
-            return "distil-whisper-large-v3-en", 100
+            default_model = model_config.get("default", "distil-whisper-large-v3-en")
+            return default_model, GROQ_RPM_DEV.get(default_model, 100)
         else:
-            return "whisper-large-v3", 300
+            fallback_model = model_config.get("fallback", "whisper-large-v3")
+            return fallback_model, GROQ_RPM_DEV.get(fallback_model, 300)
 
 def estimate_chunk_size_mb(duration_seconds: int, sample_rate: int = 16000) -> float:
     """Estimate chunk size in MB for FLAC format"""

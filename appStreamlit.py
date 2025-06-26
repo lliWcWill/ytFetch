@@ -6,7 +6,6 @@ import json # For pretty printing JSON output
 import yt_dlp
 import re
 import time
-import yaml
 import os
 import tempfile
 import logging
@@ -15,22 +14,19 @@ import isodate
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import random
 
-# --- Configuration Loading ---
+# Import the new config loader
+from config_loader import load_config, get_api_key
 
-def load_config():
-    """Load configuration from config.yaml file"""
-    try:
-        with open("config.yaml", "r") as file:
-            return yaml.safe_load(file)
-    except FileNotFoundError:
-        st.error("config.yaml file not found. Please create it with your API keys.")
-        st.stop()
-    except yaml.YAMLError:
-        st.error("Error parsing config.yaml. Please check its format.")
-        st.stop()
+# --- Configuration Loading ---
 
 # Load configuration at startup
 config = load_config()
+
+# Check if essential API keys are available
+if not get_api_key("groq") and not get_api_key("openai"):
+    st.error("⚠️ No API keys found. Please configure your API keys in config.yaml or Streamlit secrets.")
+    st.info("For Streamlit Cloud deployment, add secrets in the app settings.")
+    st.stop()
 
 
 # --- Core Transcript Logic (adapted from your script) ---
