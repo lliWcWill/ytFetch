@@ -1,8 +1,2 @@
-# System dependencies for Streamlit Cloud
-# These packages will be installed via apt-get
-
-# FFmpeg for audio processing
 ffmpeg
-
-# Additional audio libraries
 libavcodec-extra
