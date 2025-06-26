@@ -52,7 +52,7 @@ pydantic==2.11.4
 pydantic_core==2.33.2
 pydeck==0.9.1
 pydub==0.25.1
-pyaudioop==0.2.14
+audioop-lts==0.2.1
 Pygments==2.19.1
 pyparsing==3.2.3
 pytest==8.4.0
