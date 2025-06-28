@@ -4,7 +4,9 @@ config.yaml
 # Project documentation (keep out of repo)
 2ndClaude.md
 CHANGELOG.md
-docs/memory/
+
+# Ignore future changes to docs/memory but keep existing files
+docs/memory/*
 
 # Python
 __pycache__/
