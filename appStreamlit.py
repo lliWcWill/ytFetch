@@ -378,6 +378,21 @@ def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None
         'quiet': True,
         'no_warnings': True,
         'progress_hooks': [progress_hook],
+        # Fix for 403 errors - Updated headers and user agent
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'http_headers': {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        },
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},  # Use Android client as fallback
     }
 
     try:
@@ -394,6 +409,9 @@ def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None
             
     except Exception as e:
         logging.error(f"Error downloading audio: {e}")
+        # Check if it's a 403 error
+        if "403" in str(e) or "Forbidden" in str(e):
+            raise Exception(f"403 Forbidden error - YouTube is blocking the download. Try the troubleshooting steps.")
         return None
 
 
@@ -443,8 +461,70 @@ if 'video_info' not in st.session_state:
 if 'transcript_cache' not in st.session_state:
     st.session_state.transcript_cache = {}  # Cache transcripts by video ID
 
-# Debug mode toggle
-st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=st.session_state.debug_mode)
+# Sidebar with troubleshooting
+with st.sidebar:
+    st.header("🛠️ Settings & Troubleshooting")
+    
+    # Debug mode toggle
+    st.session_state.debug_mode = st.checkbox("Enable Debug Mode", value=st.session_state.debug_mode)
+    
+    # 403 Error Troubleshooting
+    with st.expander("⚠️ Fix 403 Forbidden Errors"):
+        st.markdown("""
+        If you're getting **403 Forbidden** errors, try these solutions:
+        
+        1. **Update yt-dlp** (most common fix):
+        ```bash
+        yt-dlp -U
+        ```
+        
+        2. **Clear yt-dlp cache**:
+        ```bash
+        yt-dlp --rm-cache-dir
+        ```
+        
+        3. **Alternative Solutions**:
+        - Use a VPN to change your IP
+        - Try again in a few minutes
+        - Use the official transcript method instead
+        
+        4. **Browser Cookies** (advanced):
+        - Export cookies from your browser
+        - Some videos require authentication
+        """)
+        
+        # Import yt_dlp_utils if available
+        try:
+            from yt_dlp_utils import update_yt_dlp, clear_yt_dlp_cache, get_yt_dlp_version
+            
+            st.markdown("---")
+            st.markdown("**Quick Actions:**")
+            
+            # Show current version
+            current_version = get_yt_dlp_version()
+            st.info(f"Current yt-dlp version: {current_version}")
+            
+            # Update button
+            if st.button("🔄 Update yt-dlp"):
+                with st.spinner("Updating yt-dlp..."):
+                    success, message = update_yt_dlp()
+                    if success:
+                        st.success("✅ yt-dlp updated successfully!")
+                    else:
+                        st.error(f"❌ Update failed: {message}")
+            
+            # Clear cache button
+            if st.button("🧹 Clear yt-dlp Cache"):
+                with st.spinner("Clearing cache..."):
+                    success, message = clear_yt_dlp_cache()
+                    if success:
+                        st.success("✅ Cache cleared successfully!")
+                        st.info(message)
+                    else:
+                        st.error(f"❌ Failed to clear cache: {message}")
+                        
+        except ImportError:
+            st.info("Advanced troubleshooting tools not available in cloud deployment.")
 
 # URL Input
 url = st.text_input("Enter YouTube Video URL:", key="youtube_url_input")
@@ -707,7 +787,18 @@ if unofficial_button or groq_button:
 
 # Display errors if any
 if st.session_state.error_message:
-    st.error(st.session_state.error_message)
+    # Special handling for 403 errors
+    if "403" in st.session_state.error_message or "Forbidden" in st.session_state.error_message:
+        st.error("⚠️ **403 Forbidden Error** - YouTube is blocking the download")
+        st.warning("""
+        **Quick Solutions:**
+        1. Check the sidebar for troubleshooting steps
+        2. Try using the **"Fetch Unofficial Transcripts"** button instead
+        3. Wait a few minutes and try again
+        4. The video might be age-restricted or private
+        """)
+    else:
+        st.error(st.session_state.error_message)
 
 # Display transcript and format options if segments are fetched
 if st.session_state.fetched_segments:
