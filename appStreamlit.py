@@ -78,11 +78,21 @@ def get_video_info(video_id):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
+            
+            # Check if it's a live stream
+            is_live = info.get('is_live', False)
+            live_status = info.get('live_status', 'none')  # 'is_live', 'is_upcoming', 'was_live', 'none'
+            
             return {
                 'title': info.get('title', f'video_{video_id}'),
                 'id': video_id,
                 'url': video_url,
-                'duration': info.get('duration', 0)  # Duration in seconds
+                'duration': info.get('duration', 0),  # Duration in seconds
+                'is_live': is_live,
+                'live_status': live_status,
+                'was_live': live_status == 'was_live',
+                'description': info.get('description', ''),
+                'uploader': info.get('uploader', ''),
             }
     except Exception as e:
         st.warning(f"Could not fetch video info: {e}")
@@ -122,6 +132,9 @@ def get_video_id_from_url(youtube_url):
         if parsed_url.path.startswith('/v/'):
             return parsed_url.path.split('/')[2].split('?')[0]
         if parsed_url.path.startswith('/shorts/'):
+            return parsed_url.path.split('/')[2].split('?')[0]
+        if parsed_url.path.startswith('/live/'):
+            # Handle live stream URLs like https://www.youtube.com/live/BBhZ9Ltpmdw
             return parsed_url.path.split('/')[2].split('?')[0]
     return None
 
@@ -318,15 +331,29 @@ def format_segments(segments, output_format="txt"):
         return f"Error formatting transcript: {str(e)}"
 
 def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None, progress_placeholder=None, status_placeholder=None):
-    """Download the audio of a YouTube video as MP3 using yt-dlp with progress tracking."""
+    """Download the audio of a YouTube video as MP3 using yt-dlp with progress tracking. Supports live streams."""
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     
     os.makedirs(output_dir, exist_ok=True)
     
-    # Get video title if not provided
+    # Get video info including live status
+    video_info = get_video_info(video_id)
     if not video_title:
-        video_info = get_video_info(video_id)
         video_title = video_info['title']
+    
+    # Check live stream status
+    is_live = video_info.get('is_live', False)
+    live_status = video_info.get('live_status', 'none')
+    
+    # Handle different live stream states
+    if status_placeholder:
+        if is_live:
+            status_placeholder.warning("🔴 **LIVE NOW** - Downloading from live stream...")
+        elif live_status == 'is_upcoming':
+            status_placeholder.error("📅 **UPCOMING** - This stream hasn't started yet. Please try again when it's live.")
+            return None
+        elif live_status == 'was_live':
+            status_placeholder.info("📺 **RECORDED LIVE** - Downloading completed live stream...")
     
     # Sanitize title for filename
     safe_title = sanitize_filename(video_title)
@@ -394,6 +421,24 @@ def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None
         },
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}},  # Use Android client as fallback
     }
+    
+    # Add live stream specific options
+    if is_live or live_status == 'was_live':
+        # For ongoing live streams, download from the start
+        if is_live:
+            ydl_opts['live_from_start'] = True
+            ydl_opts['hls_use_mpegts'] = True
+            # Set a reasonable recording duration (2 hours max)
+            ydl_opts['fixup'] = 'never'
+        
+        # For both live and recorded live streams, use better format selection
+        ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
+        
+        if status_placeholder:
+            if is_live:
+                status_placeholder.warning("🔴 **LIVE STREAM** - Recording from current point. This may take longer...")
+            else:
+                status_placeholder.info("📺 **RECORDED LIVE STREAM** - Downloading archived stream...")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
