@@ -1,6 +1,11 @@
 # API Keys and sensitive configuration
 config.yaml
 
+# Cookie files (NEVER commit real cookies)
+cookies.txt
+*.cookies
+*_cookies.txt
+
 # Project documentation (keep out of repo)
 2ndClaude.md
 CHANGELOG.md

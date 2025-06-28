@@ -397,13 +397,52 @@ def download_audio_as_mp3_enhanced(video_id, output_dir="video_outputs", video_t
     safe_title = sanitize_filename(video_title)
     final_mp3_path = os.path.join(output_dir, f"{safe_title}.mp3")
     
+    # Check for cookie file in production
+    cookie_file = None
+    if os.path.exists("cookies.txt"):
+        cookie_file = "cookies.txt"
+        if status_placeholder:
+            status_placeholder.info("🍪 Found cookie file for authentication")
+    
     if status_placeholder:
         status_placeholder.info("🔍 Trying enhanced download strategies...")
     
-    # Strategy 1: yt-dlp with advanced anti-bot headers (no cookies needed)
+    # Strategy 1: yt-dlp with cookie file (if available)
+    if cookie_file:
+        try:
+            if status_placeholder:
+                status_placeholder.text("🔄 Strategy 1: yt-dlp with cookie authentication...")
+                
+            ydl_opts = {
+                'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'outtmpl': os.path.join(output_dir, f"{safe_title}.%(ext)s"),
+                'quiet': True,
+                'no_warnings': True,
+                'cookies': cookie_file,
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+                
+            if os.path.exists(final_mp3_path):
+                if status_placeholder:
+                    status_placeholder.success("✅ Downloaded with cookie authentication!")
+                return final_mp3_path
+                
+        except Exception as e:
+            if status_placeholder:
+                status_placeholder.warning(f"⚠️ Cookie strategy failed: {str(e)[:100]}...")
+    
+    # Strategy 2: yt-dlp with advanced anti-bot headers
     try:
         if status_placeholder:
-            status_placeholder.text("🔄 Strategy 1: yt-dlp with anti-bot headers...")
+            status_placeholder.text("🔄 Strategy 2: yt-dlp with anti-bot headers...")
             
         ydl_opts = {
             'format': 'bestaudio[ext=m4a]/bestaudio/best',
@@ -434,6 +473,9 @@ def download_audio_as_mp3_enhanced(video_id, output_dir="video_outputs", video_t
             },
         }
         
+        if cookie_file:
+            ydl_opts['cookies'] = cookie_file
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
             
@@ -444,12 +486,12 @@ def download_audio_as_mp3_enhanced(video_id, output_dir="video_outputs", video_t
             
     except Exception as e:
         if status_placeholder:
-            status_placeholder.warning(f"⚠️ Strategy 1 failed: {str(e)[:100]}...")
+            status_placeholder.warning(f"⚠️ Strategy 2 failed: {str(e)[:100]}...")
     
-    # Strategy 2: yt-dlp with TV client (often bypasses restrictions)
+    # Strategy 3: yt-dlp with TV client (often bypasses restrictions)
     try:
         if status_placeholder:
-            status_placeholder.text("🔄 Strategy 2: yt-dlp with TV client...")
+            status_placeholder.text("🔄 Strategy 3: yt-dlp with TV client...")
             
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -470,6 +512,9 @@ def download_audio_as_mp3_enhanced(video_id, output_dir="video_outputs", video_t
             'user_agent': 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/40.13031-qa (unlike Gecko) v8/8.8.278.8-jit gles Starboard/12',
         }
         
+        if cookie_file:
+            ydl_opts['cookies'] = cookie_file
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
             
@@ -480,12 +525,12 @@ def download_audio_as_mp3_enhanced(video_id, output_dir="video_outputs", video_t
             
     except Exception as e:
         if status_placeholder:
-            status_placeholder.warning(f"⚠️ Strategy 2 failed: {str(e)[:100]}...")
+            status_placeholder.warning(f"⚠️ Strategy 3 failed: {str(e)[:100]}...")
     
-    # Strategy 3: pytube fallback
+    # Strategy 4: pytube fallback
     try:
         if status_placeholder:
-            status_placeholder.text("🔄 Strategy 3: Trying pytube...")
+            status_placeholder.text("🔄 Strategy 4: Trying pytube...")
             
         from pytube import YouTube
         
@@ -510,12 +555,12 @@ def download_audio_as_mp3_enhanced(video_id, output_dir="video_outputs", video_t
                 
     except Exception as e:
         if status_placeholder:
-            status_placeholder.warning(f"⚠️ Strategy 3 failed: {str(e)[:100]}...")
+            status_placeholder.warning(f"⚠️ Strategy 4 failed: {str(e)[:100]}...")
     
-    # Strategy 4: yt-dlp with embedded client (very reliable)
+    # Strategy 5: yt-dlp with embedded client (very reliable)
     try:
         if status_placeholder:
-            status_placeholder.text("🔄 Strategy 4: yt-dlp with embedded client...")
+            status_placeholder.text("🔄 Strategy 5: yt-dlp with embedded client...")
             
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -535,6 +580,9 @@ def download_audio_as_mp3_enhanced(video_id, output_dir="video_outputs", video_t
             },
         }
         
+        if cookie_file:
+            ydl_opts['cookies'] = cookie_file
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([video_url])
             
@@ -545,12 +593,12 @@ def download_audio_as_mp3_enhanced(video_id, output_dir="video_outputs", video_t
             
     except Exception as e:
         if status_placeholder:
-            status_placeholder.warning(f"⚠️ Strategy 4 failed: {str(e)[:100]}...")
+            status_placeholder.warning(f"⚠️ Strategy 5 failed: {str(e)[:100]}...")
     
-    # Strategy 5: moviepy + youtube-dl fallback
+    # Strategy 6: moviepy + youtube-dl fallback
     try:
         if status_placeholder:
-            status_placeholder.text("🔄 Strategy 5: Trying moviepy extraction...")
+            status_placeholder.text("🔄 Strategy 6: Trying moviepy extraction...")
             
         import tempfile
         try:

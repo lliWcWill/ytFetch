@@ -209,11 +209,20 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **yt-dlp** for robust audio extraction
 - **Streamlit** for the beautiful web interface
 
+## 🚀 Deployment
+
+For production deployment on Streamlit Cloud or other platforms, see our comprehensive [Deployment Guide](DEPLOYMENT.md) which covers:
+- Cookie authentication setup
+- Handling YouTube bot detection in production
+- Proxy configuration
+- Security best practices
+
 ## 📞 Support
 
 - 🐛 [Report Issues](https://github.com/lliWcWill/ytFetch/issues)
 - 💡 [Feature Requests](https://github.com/lliWcWill/ytFetch/discussions)
 - 📖 [Documentation](https://github.com/lliWcWill/ytFetch/wiki)
+- 🚀 [Deployment Guide](DEPLOYMENT.md)
 
 ---
 
