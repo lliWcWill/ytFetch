@@ -60,6 +60,31 @@ cp config.yaml.example config.yaml
 streamlit run appStreamlit.py
 ```
 
+### 🖥️ Command Line Interface (CLI)
+For fast, scriptable transcription without the GUI:
+
+```bash
+# Transcribe a YouTube video to text
+python transcribe_cli.py "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# Transcribe to SRT format with OpenAI
+python transcribe_cli.py "https://youtu.be/VIDEO_ID" --output srt --provider openai
+
+# Transcribe local audio file to WebVTT
+python transcribe_cli.py "/path/to/audio.mp3" --output vtt
+
+# Save output to file
+python transcribe_cli.py "YouTube_URL" --output json --save transcript.json
+
+# Get help
+python transcribe_cli.py --help
+```
+
+#### CLI Options:
+- `--output` (`-o`): Output format: `txt`, `srt`, `vtt`, `json` (default: `txt`)
+- `--provider` (`-p`): Transcription provider: `groq`, `openai` (default: `groq`)
+- `--save` (`-s`): Save to file instead of printing to stdout
+
 ## 📊 Performance Benchmarks
 
 | Audio Length | Processing Time | Speed Factor | Chunks | Workers |
@@ -117,13 +142,19 @@ OPTIMAL_SAMPLE_RATE = 16000     # Speech optimized
 
 ```
 ytFetch/
-├── appStreamlit.py           # Web interface with enhanced UI
-├── audio_transcriber.py      # Groq-optimized transcription engine
-├── fetchTscript.py          # CLI transcript extraction
-├── config.yaml.example     # Configuration template
-├── docs/                    # Documentation and screenshots
-├── tests/                   # Unit tests
-└── video_outputs/           # Output directory
+├── appStreamlit.py                    # 🌐 Web interface (Streamlit app)
+├── transcribe_cli.py                  # 🖥️ Command line interface
+├── audio_transcriber.py               # ⚡ Core transcription engine
+├── config_loader.py                   # ⚙️ Configuration management
+├── config.yaml.example               # 📝 Configuration template
+├── performance_optimizations/         # 🚀 High-performance modules
+├── tests/                            # 🧪 All test files
+│   ├── test_webshare_integration.py  # Proxy integration tests
+│   ├── test_live_standalone.py       # Live stream tests
+│   └── test_yt_dlp_fallbacks.py      # Fallback strategy tests
+├── misc/                             # 📦 Legacy/backup files
+├── docs/                             # 📚 Documentation
+└── video_outputs/                    # 📁 Output directory
 ```
 
 ## 🤝 Contributing
