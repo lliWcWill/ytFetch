@@ -5,11 +5,14 @@
 
 // TypeScript Interfaces
 
+export type TranscriptionMethod = 'unofficial' | 'groq';
+export type OutputFormat = 'txt' | 'srt' | 'vtt' | 'json';
+
 export interface TranscribeRequest {
   url: string;
   client_id: string;
-  output_format?: string;
-  provider?: string;
+  method: TranscriptionMethod;
+  output_format?: OutputFormat;
   language?: string;
 }
 
@@ -84,9 +87,16 @@ export class ApiValidationError extends Error {
 
 /**
  * Generates a unique client ID using UUID v4
+ * Follows RFC 4122 standard for UUID v4 generation
  */
 export function generateClientId(): string {
-  // Simple UUID v4 implementation
+  // UUID v4 implementation with proper random number generation
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    // Use native crypto.randomUUID if available (modern browsers)
+    return crypto.randomUUID();
+  }
+  
+  // Fallback implementation for older browsers
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
     const r = Math.random() * 16 | 0;
     const v = c === 'x' ? r : (r & 0x3 | 0x8);
@@ -107,24 +117,24 @@ export function getApiUrl(): string {
 }
 
 /**
- * Creates headers for API requests
+ * Creates headers for API requests with authentication
  */
-function createHeaders(includeContentType = true): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Accept': 'application/json',
-  };
-  
-  if (includeContentType) {
-    headers['Content-Type'] = 'application/json';
-  }
-  
-  return headers;
+async function createHeaders(includeContentType = true): Promise<Record<string, string>> {
+  const { createAuthHeaders } = await import('@/lib/auth-token');
+  return await createAuthHeaders(includeContentType);
 }
 
 /**
  * Handles fetch responses with proper error handling and type safety
  */
 async function handleResponse<T>(response: Response): Promise<T> {
+  // Handle 401 Unauthorized - redirect to login
+  if (response.status === 401) {
+    const { handleAuthError } = await import('@/lib/auth-token');
+    handleAuthError();
+    throw new ApiHttpError('Authentication required', 401, 'Unauthorized', null);
+  }
+
   // Check if response is ok
   if (!response.ok) {
     let errorData: any;
@@ -161,10 +171,11 @@ async function apiRequest<T>(
   const url = `${getApiUrl()}${endpoint}`;
   
   try {
+    const defaultHeaders = await createHeaders();
     const response = await fetch(url, {
       ...options,
       headers: {
-        ...createHeaders(),
+        ...defaultHeaders,
         ...options.headers,
       },
     });
@@ -194,17 +205,17 @@ async function apiRequest<T>(
 /**
  * Starts a transcription job for a YouTube video
  * @param url - YouTube video URL
- * @param clientId - Unique client identifier
- * @param options - Optional transcription parameters
+ * @param clientId - Unique client identifier (UUID v4)
+ * @param options - Optional transcription parameters including method, output_format, and language
  * @returns Promise<TranscribeResponse>
  */
 export async function startTranscriptionJob(
   url: string,
   clientId: string,
   options?: {
-    output_format?: string;
-    provider?: string;
+    output_format?: OutputFormat;
     language?: string;
+    method?: TranscriptionMethod;
   }
 ): Promise<TranscribeResponse> {
   // Validate required parameters
@@ -214,6 +225,11 @@ export async function startTranscriptionJob(
   
   if (!clientId || typeof clientId !== 'string') {
     throw new ApiValidationError('Client ID is required and must be a string');
+  }
+
+  const method = options?.method || 'groq';
+  if (method !== 'unofficial' && method !== 'groq') {
+    throw new ApiValidationError('Method must be either "unofficial" or "groq"');
   }
   
   // URL validation (basic YouTube URL check)
@@ -225,6 +241,8 @@ export async function startTranscriptionJob(
   const requestData: TranscribeRequest = {
     url,
     client_id: clientId,
+    method,
+    output_format: options?.output_format || 'txt',
     ...options,
   };
 
@@ -242,6 +260,21 @@ export async function startTranscriptionJob(
         error.response?.details
       );
     }
+    
+    // Handle method-specific errors
+    if (error instanceof ApiHttpError && error.status === 400) {
+      if (error.response?.details?.includes('groq')) {
+        throw new ApiValidationError(
+          'Groq transcription error: Check API key configuration or try unofficial method'
+        );
+      }
+      if (error.response?.details?.includes('unofficial')) {
+        throw new ApiValidationError(
+          'Unofficial transcription error: Video may not have auto-generated captions or try groq method'
+        );
+      }
+    }
+    
     throw error;
   }
 }
@@ -314,8 +347,97 @@ export async function healthCheck(): Promise<{
   return await apiRequest('/api/v1/health');
 }
 
+/**
+ * Downloads the ZIP file of completed transcripts for a bulk job
+ * @param jobId - The job ID to download
+ * @returns Promise<void>
+ */
+export async function downloadJobResults(jobId: string): Promise<void> {
+  if (!jobId || typeof jobId !== 'string') {
+    throw new ApiValidationError('Job ID is required and must be a string');
+  }
+
+  const url = `${getApiUrl()}/api/v1/bulk/jobs/${jobId}/download`;
+  
+  try {
+    const headers = await createHeaders(false);
+    const response = await fetch(url, {
+      headers,
+    });
+    
+    if (!response.ok) {
+      let errorData: any;
+      try {
+        errorData = await response.json();
+      } catch {
+        errorData = { error: 'Download failed', message: response.statusText };
+      }
+      
+      throw new ApiHttpError(
+        errorData.message || `HTTP ${response.status}: ${response.statusText}`,
+        response.status,
+        response.statusText,
+        errorData
+      );
+    }
+
+    // Get the blob
+    const blob = await response.blob();
+    
+    // Create temporary URL
+    const downloadUrl = URL.createObjectURL(blob);
+    
+    // Create temporary anchor element and trigger download
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    link.download = `job-${jobId}-transcripts.zip`;
+    document.body.appendChild(link);
+    link.click();
+    
+    // Clean up
+    document.body.removeChild(link);
+    URL.revokeObjectURL(downloadUrl);
+  } catch (error) {
+    if (error instanceof ApiHttpError) {
+      throw error;
+    }
+    
+    throw new ApiNetworkError(
+      `Download failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      error instanceof Error ? error : undefined
+    );
+  }
+}
+
+/**
+ * Creates a transcription request with sensible defaults
+ * @param url - YouTube video URL
+ * @param method - Transcription method
+ * @param options - Optional parameters
+ * @returns Complete transcription request object
+ */
+export function createTranscriptionRequest(
+  url: string,
+  method: TranscriptionMethod,
+  options?: {
+    output_format?: OutputFormat;
+    language?: string;
+    client_id?: string;
+  }
+): TranscribeRequest {
+  return {
+    url,
+    client_id: options?.client_id || generateClientId(),
+    method,
+    output_format: options?.output_format || 'txt',
+    ...(options?.language && { language: options.language }),
+  };
+}
+
 // Export types and utilities for use in components
 export type {
+  TranscriptionMethod,
+  OutputFormat,
   TranscribeRequest,
   TranscribeResponse,
   VideoMetadata,
@@ -324,8 +446,8 @@ export type {
   ApiResponse,
 };
 
-export {
+export const ApiErrors = {
   ApiNetworkError,
   ApiHttpError,
   ApiValidationError,
-} as ApiErrors;
+};
