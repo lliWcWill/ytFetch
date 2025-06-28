@@ -145,11 +145,43 @@ def get_video_id_from_url(youtube_url):
 )
 def fetch_transcript_segments(video_id):
     """
-    Fetches transcript segments using tenacity for robust,
-    production-grade retry logic with exponential backoff.
+    Fetches transcript segments using youtube-transcript-api v1.1.0 with Webshare proxy support
+    and robust retry logic with exponential backoff.
     """
     print(f"\n🔍 DEBUG: Attempting to fetch transcript for video_id: {video_id}")
+    
+    # Import the new v1.1.0 components
     try:
+        from youtube_transcript_api.proxies import WebshareProxyConfig
+        from config_loader import get_webshare_credentials
+        
+        # Get Webshare credentials
+        webshare_username, webshare_password = get_webshare_credentials()
+        
+        # Create YouTubeTranscriptApi instance with proxy if available
+        if webshare_username and webshare_password:
+            print("🔗 DEBUG: Using Webshare proxy for enhanced reliability")
+            proxy_config = WebshareProxyConfig(
+                proxy_username=webshare_username,
+                proxy_password=webshare_password
+            )
+            ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+        else:
+            print("⚠️ DEBUG: No Webshare credentials found, using direct connection")
+            ytt_api = YouTubeTranscriptApi()
+        
+        # Use new v1.1.0 API
+        transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
+        
+        if not transcript or not transcript.segments:
+            raise ValueError("Fetched transcript data is empty.")
+
+        print("✅ DEBUG: Successfully fetched and validated transcript segments.")
+        return transcript.segments, transcript.language, None
+
+    except ImportError:
+        # Fallback to old API if new version not available
+        print("⚠️ DEBUG: Using fallback to old youtube-transcript-api")
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         transcript_obj = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
         fetched_segments = transcript_obj.fetch()
@@ -157,12 +189,12 @@ def fetch_transcript_segments(video_id):
         if not fetched_segments:
             raise ValueError("Fetched transcript data is empty.")
 
-        print("✅ DEBUG: Successfully fetched and validated transcript segments.")
+        print("✅ DEBUG: Successfully fetched and validated transcript segments (fallback).")
         return fetched_segments, transcript_obj.language, None
 
     except Exception as e:
         print(f"💥 DEBUG: An error occurred. Tenacity will handle the retry. Error: {e}")
-        raise e # Re-raise the exception for tenacity to catch.
+        raise e  # Re-raise the exception for tenacity to catch.
 
 def parse_srt_to_segments(srt_text):
     """Parse SRT format text into segments compatible with existing format."""

@@ -48,5 +48,11 @@ audio_*.mp3
 transcript_*.txt
 *_processed.flac
 
-#video
+# Video and test downloads
 video_outputs/
+fallback_test_downloads/
+live_test_downloads/
+test_downloads/
+
+# Test files (keep the test scripts, ignore downloads)
+*_test_downloads/

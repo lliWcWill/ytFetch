@@ -26,6 +26,8 @@ def load_config():
             config = {
                 "groq_api_key": st.secrets.get("groq_api_key", None),
                 "openai_api_key": st.secrets.get("openai_api_key", None),
+                "webshare_username": st.secrets.get("webshare_username", None),
+                "webshare_password": st.secrets.get("webshare_password", None),
             }
             
             # Load performance settings if available
@@ -89,6 +91,32 @@ def get_api_key(provider: str) -> str:
     
     logger.warning(f"No API key found for {provider}")
     return ""
+
+
+def get_webshare_credentials() -> tuple:
+    """
+    Get Webshare proxy credentials.
+    
+    Returns:
+        tuple: (username, password) or (None, None) if not found
+    """
+    config = load_config()
+    
+    username = config.get("webshare_username")
+    password = config.get("webshare_password")
+    
+    # Check environment variables as fallback
+    if not username:
+        username = os.environ.get("WEBSHARE_USERNAME")
+    if not password:
+        password = os.environ.get("WEBSHARE_PASSWORD")
+    
+    if username and password:
+        logger.info("Webshare credentials found")
+        return username, password
+    else:
+        logger.warning("No Webshare credentials found")
+        return None, None
 
 
 def get_performance_config() -> dict:
