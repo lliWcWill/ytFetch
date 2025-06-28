@@ -158,26 +158,47 @@ def fetch_transcript_segments(video_id):
         # Get Webshare credentials
         webshare_username, webshare_password = get_webshare_credentials()
         
-        # Create YouTubeTranscriptApi instance with proxy if available
+        # Try with Webshare proxy first, fallback to direct connection
+        transcript = None
+        
         if webshare_username and webshare_password:
-            print("🔗 DEBUG: Using Webshare proxy for enhanced reliability")
-            proxy_config = WebshareProxyConfig(
-                proxy_username=webshare_username,
-                proxy_password=webshare_password
-            )
-            ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+            try:
+                print("🔗 DEBUG: Using Webshare proxy for enhanced reliability")
+                proxy_config = WebshareProxyConfig(
+                    proxy_username=webshare_username,
+                    proxy_password=webshare_password,
+                    retries_when_blocked=3  # Reduce retries for faster fallback
+                )
+                ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
+                transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
+                print("✅ DEBUG: Webshare proxy successful!")
+                
+            except Exception as proxy_error:
+                print(f"⚠️ DEBUG: Webshare proxy failed ({proxy_error}), falling back to direct connection")
+                ytt_api = YouTubeTranscriptApi()
+                transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
+                print("✅ DEBUG: Direct connection successful!")
         else:
             print("⚠️ DEBUG: No Webshare credentials found, using direct connection")
             ytt_api = YouTubeTranscriptApi()
+            transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
+            print("✅ DEBUG: Direct connection successful!")
         
-        # Use new v1.1.0 API
-        transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
-        
-        if not transcript or not transcript.segments:
+        if not transcript or not transcript.snippets:
             raise ValueError("Fetched transcript data is empty.")
 
         print("✅ DEBUG: Successfully fetched and validated transcript segments.")
-        return transcript.segments, transcript.language, None
+        
+        # Convert FetchedTranscriptSnippet objects to dict format for compatibility
+        segments = []
+        for snippet in transcript.snippets:
+            segments.append({
+                'text': snippet.text,
+                'start': snippet.start,
+                'duration': snippet.duration
+            })
+        
+        return segments, transcript.language, None
 
     except ImportError:
         # Fallback to old API if new version not available

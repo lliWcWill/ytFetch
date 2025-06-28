@@ -1,6 +1,11 @@
 # API Keys and sensitive configuration
 config.yaml
 
+# Project documentation (keep out of repo)
+2ndClaude.md
+CHANGELOG.md
+docs/memory/
+
 # Python
 __pycache__/
 *.py[cod]
