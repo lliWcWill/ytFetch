@@ -331,7 +331,7 @@ def format_segments(segments, output_format="txt"):
         return f"Error formatting transcript: {str(e)}"
 
 def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None, progress_placeholder=None, status_placeholder=None):
-    """Download the audio of a YouTube video as MP3 using yt-dlp with progress tracking. Supports live streams."""
+    """Download the audio of a YouTube video as MP3 using yt-dlp with robust fallback strategies."""
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     
     os.makedirs(output_dir, exist_ok=True)
@@ -394,70 +394,120 @@ def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None
             if progress_placeholder:
                 progress_placeholder.progress(1.0)
 
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'outtmpl': output_template,
-        'quiet': True,
-        'no_warnings': True,
-        'progress_hooks': [progress_hook],
-        # Fix for 403 errors - Updated headers and user agent
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        'http_headers': {
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-        },
-        'extractor_args': {'youtube': {'player_client': ['android', 'web']}},  # Use Android client as fallback
-    }
+    # Define fallback strategies based on successful test results
+    def create_strategy_1_standard():
+        """Strategy 1: Standard approach (most reliable)"""
+        return {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': output_template,
+            'quiet': True,
+            'no_warnings': True,
+            'progress_hooks': [progress_hook],
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'http_headers': {
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+            },
+        }
     
-    # Add live stream specific options
-    if is_live or live_status == 'was_live':
-        # For ongoing live streams, download from the start
-        if is_live:
-            ydl_opts['live_from_start'] = True
-            ydl_opts['hls_use_mpegts'] = True
-            # Set a reasonable recording duration (2 hours max)
-            ydl_opts['fixup'] = 'never'
-        
-        # For both live and recorded live streams, use better format selection
-        ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio/best'
-        
-        if status_placeholder:
+    def create_strategy_2_live_optimized():
+        """Strategy 2: Live stream optimized (best for live content)"""
+        opts = create_strategy_1_standard()
+        if is_live or live_status == 'was_live':
+            opts.update({
+                'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                'live_from_start': True,
+                'hls_use_mpegts': True,
+                'wait_for_video': 5,
+            })
             if is_live:
-                status_placeholder.warning("🔴 **LIVE STREAM** - Recording from current point. This may take longer...")
-            else:
-                status_placeholder.info("📺 **RECORDED LIVE STREAM** - Downloading archived stream...")
+                opts['fixup'] = 'never'
+        return opts
+    
+    def create_strategy_3_android_client():
+        """Strategy 3: Android client (good for restricted content)"""
+        opts = create_strategy_1_standard()
+        opts.update({
+            'extractor_args': {'youtube': {'player_client': ['android']}},
+            'user_agent': 'Mozilla/5.0 (Linux; Android 11; SM-G973F) AppleWebKit/537.36',
+        })
+        return opts
+    
+    def create_strategy_4_combined():
+        """Strategy 4: Combined best practices"""
+        opts = create_strategy_1_standard()
+        opts.update({
+            'force_ipv4': True,
+            'nocheckcertificate': True,
+            'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+        })
+        if is_live or live_status == 'was_live':
+            opts.update({
+                'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                'live_from_start': True,
+                'hls_use_mpegts': True,
+            })
+        return opts
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
-        
-        # Check if the mp3 file was actually created
-        if os.path.exists(final_mp3_path):
-            logging.info(f"Audio successfully downloaded to: {final_mp3_path}")
-            return final_mp3_path
-        else:
-            logging.error(f"Audio download failed. Target file {final_mp3_path} not found.")
-            return None
+    # Try strategies in order of reliability
+    strategies = [
+        ("Standard", create_strategy_1_standard),
+        ("Live Optimized", create_strategy_2_live_optimized),
+        ("Android Client", create_strategy_3_android_client),
+        ("Combined", create_strategy_4_combined),
+    ]
+    
+    for strategy_name, create_opts in strategies:
+        try:
+            if status_placeholder:
+                if strategy_name != "Standard":
+                    status_placeholder.text(f"🔄 Trying {strategy_name} strategy...")
+                
+            ydl_opts = create_opts()
             
-    except Exception as e:
-        logging.error(f"Error downloading audio: {e}")
-        # Check if it's a 403 error
-        if "403" in str(e) or "Forbidden" in str(e):
-            raise Exception(f"403 Forbidden error - YouTube is blocking the download. Try the troubleshooting steps.")
-        return None
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+            
+            # Check if the mp3 file was actually created
+            if os.path.exists(final_mp3_path):
+                logging.info(f"Audio successfully downloaded using {strategy_name} strategy: {final_mp3_path}")
+                if status_placeholder and strategy_name != "Standard":
+                    status_placeholder.success(f"✅ Download successful using {strategy_name} strategy!")
+                return final_mp3_path
+            else:
+                logging.warning(f"{strategy_name} strategy completed but MP3 file not found")
+                continue
+                
+        except Exception as e:
+            logging.warning(f"{strategy_name} strategy failed: {e}")
+            
+            # Check if it's a specific error we should handle
+            if "403" in str(e) or "Forbidden" in str(e):
+                if status_placeholder:
+                    status_placeholder.warning(f"⚠️ {strategy_name} blocked by YouTube, trying next strategy...")
+                continue
+            elif "player response" in str(e).lower():
+                if status_placeholder:
+                    status_placeholder.warning(f"⚠️ {strategy_name} player response error, trying next strategy...")
+                continue
+            else:
+                # For other errors, continue to next strategy
+                continue
+    
+    # If all strategies failed
+    logging.error("All download strategies failed")
+    if status_placeholder:
+        status_placeholder.error("❌ All download strategies failed. Try the troubleshooting steps in the sidebar.")
+    
+    # Check if it's a 403 error that persisted across all strategies
+    raise Exception("All download strategies failed. Try updating yt-dlp or using the troubleshooting steps.")
 
 
 def generate_failure_summary(failure_reasons, video_duration):
