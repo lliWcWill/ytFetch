@@ -3,7 +3,7 @@ Pydantic schemas for API request/response models.
 Provides type safety and automatic validation.
 """
 
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 from datetime import datetime
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -22,9 +22,15 @@ class TranscribeRequest(BaseModel):
         pattern="^(txt|srt|vtt|json)$",
         examples=["txt", "srt", "vtt", "json"]
     )
+    method: Optional[str] = Field(
+        None,
+        description="Transcription method: unofficial (existing captions), groq (AI), or openai (AI)",
+        pattern="^(unofficial|groq|openai)$",
+        examples=["unofficial", "groq", "openai"]
+    )
     provider: str = Field(
         "groq",
-        description="Transcription provider to use",
+        description="Transcription provider to use (deprecated, use 'method' instead)",
         pattern="^(groq|openai)$", 
         examples=["groq", "openai"]
     )
@@ -103,7 +109,8 @@ class TranscribeResponse(BaseModel):
     video_metadata: VideoMetadata = Field(..., description="Video information")
     processing_metadata: ProcessingMetadata = Field(..., description="Processing details")
     format: str = Field(..., description="Output format used")
-    provider: Optional[str] = Field(None, description="Transcription provider used")
+    method: Optional[str] = Field(None, description="Transcription method used")
+    provider: Optional[str] = Field(None, description="Transcription provider used (deprecated)")
     language: str = Field(..., description="Detected/specified language")
 
 
@@ -125,6 +132,148 @@ class HealthResponse(BaseModel):
     services: Dict[str, str] = Field(..., description="Service status check")
 
 
+# Bulk Operation Schemas
+
+class BulkAnalyzeRequest(BaseModel):
+    """Request schema for bulk analysis of playlist/channel."""
+    
+    url: str = Field(
+        ..., 
+        description="YouTube playlist or channel URL to analyze",
+        examples=[
+            "https://www.youtube.com/playlist?list=PLsyeobzWxl7poL9JTVyndKe62ieoN-MZ3",
+            "https://www.youtube.com/@channel/videos"
+        ]
+    )
+    max_videos: Optional[int] = Field(
+        None,
+        description="Maximum number of videos to analyze (respects tier limits)",
+        ge=1,
+        le=1000,
+        examples=[10, 50, 100]
+    )
+
+
+class BulkCreateRequest(BaseModel):
+    """Request schema for creating a bulk transcription job."""
+    
+    url: str = Field(
+        ..., 
+        description="YouTube playlist or channel URL to process",
+        examples=[
+            "https://www.youtube.com/playlist?list=PLsyeobzWxl7poL9JTVyndKe62ieoN-MZ3",
+            "https://www.youtube.com/@channel/videos"
+        ]
+    )
+    transcript_method: str = Field(
+        "unofficial",
+        description="Transcription method to use",
+        pattern="^(unofficial|groq|openai)$",
+        examples=["unofficial", "groq", "openai"]
+    )
+    output_format: str = Field(
+        "txt",
+        description="Output format for transcripts",
+        pattern="^(txt|srt|vtt|json)$",
+        examples=["txt", "srt", "vtt", "json"]
+    )
+    max_videos: Optional[int] = Field(
+        None,
+        description="Maximum number of videos to process (respects tier limits)",
+        ge=1,
+        le=1000,
+        examples=[10, 50, 100]
+    )
+    webhook_url: Optional[str] = Field(
+        None,
+        description="Optional webhook URL for completion notification",
+        examples=["https://example.com/webhook"]
+    )
+
+
+class BulkTaskResponse(BaseModel):
+    """Response schema for individual bulk task information."""
+    
+    task_id: str = Field(..., description="Unique task identifier")
+    video_id: str = Field(..., description="YouTube video ID")
+    video_title: str = Field(..., description="Video title")
+    video_url: str = Field(..., description="YouTube video URL")
+    video_duration: int = Field(..., description="Video duration in seconds")
+    status: str = Field(..., description="Task status")
+    order_index: int = Field(..., description="Task order in the job")
+    retry_count: int = Field(0, description="Number of retry attempts")
+    transcript_text: Optional[str] = Field(None, description="Completed transcript")
+    language: Optional[str] = Field(None, description="Detected language")
+    processing_method: Optional[str] = Field(None, description="Processing method used")
+    error_message: Optional[str] = Field(None, description="Error message if failed")
+    created_at: str = Field(..., description="Task creation timestamp")
+    started_at: Optional[str] = Field(None, description="Task start timestamp")
+    completed_at: Optional[str] = Field(None, description="Task completion timestamp")
+
+
+class BulkJobResponse(BaseModel):
+    """Response schema for bulk job information."""
+    
+    job_id: str = Field(..., description="Unique job identifier")
+    user_id: str = Field(..., description="User identifier")
+    source_url: str = Field(..., description="Source playlist/channel URL")
+    transcript_method: str = Field(..., description="Transcription method")
+    output_format: str = Field(..., description="Output format")
+    status: str = Field(..., description="Job status")
+    total_videos: int = Field(..., description="Total number of videos")
+    completed_videos: int = Field(0, description="Number of completed videos")
+    failed_videos: int = Field(0, description="Number of failed videos")
+    pending_videos: Optional[int] = Field(None, description="Number of pending videos")
+    processing_videos: Optional[int] = Field(None, description="Number of currently processing videos")
+    retry_videos: Optional[int] = Field(None, description="Number of videos pending retry")
+    progress_percent: float = Field(0.0, description="Overall progress percentage")
+    user_tier: str = Field(..., description="User subscription tier")
+    webhook_url: Optional[str] = Field(None, description="Webhook URL for notifications")
+    zip_file_path: Optional[str] = Field(None, description="Path to ZIP file when completed")
+    zip_available: bool = Field(False, description="Whether ZIP download is available")
+    estimated_duration_minutes: Optional[float] = Field(None, description="Estimated completion time")
+    created_at: str = Field(..., description="Job creation timestamp")
+    updated_at: str = Field(..., description="Last update timestamp")
+    completed_at: Optional[str] = Field(None, description="Job completion timestamp")
+    tier_limits: Optional[Dict[str, Any]] = Field(None, description="Applicable tier limits")
+
+
+class BulkJobListResponse(BaseModel):
+    """Response schema for list of bulk jobs."""
+    
+    jobs: List[BulkJobResponse] = Field(..., description="List of bulk jobs")
+    total_count: int = Field(..., description="Total number of jobs for user")
+    page: int = Field(1, description="Current page number")
+    per_page: int = Field(20, description="Items per page")
+    has_next: bool = Field(False, description="Whether there are more pages")
+
+
+class BulkAnalyzeResponse(BaseModel):
+    """Response schema for bulk analysis results."""
+    
+    url: str = Field(..., description="Source URL that was analyzed")
+    source_type: str = Field(..., description="Type of source (playlist or channel)")
+    title: str = Field(..., description="Playlist or channel title")
+    description: Optional[str] = Field(None, description="Playlist or channel description")
+    total_videos: int = Field(..., description="Total number of videos found")
+    analyzed_videos: int = Field(..., description="Number of videos analyzed (limited by max_videos)")
+    estimated_duration_hours: float = Field(..., description="Estimated total duration in hours")
+    videos: List[Dict[str, Any]] = Field(..., description="Video metadata list")
+    tier_limits: Dict[str, Any] = Field(..., description="Applicable tier limits for user")
+    can_process_all: bool = Field(..., description="Whether user can process all videos found")
+
+
+# User tier and authentication schemas
+
+class UserInfo(BaseModel):
+    """User information schema for authenticated requests."""
+    
+    user_id: str = Field(..., description="Unique user identifier")
+    email: Optional[str] = Field(None, description="User email")
+    tier: str = Field("free", description="User subscription tier")
+    created_at: Optional[str] = Field(None, description="User creation timestamp")
+
+
 # Error response examples for documentation
 ERROR_EXAMPLES = {
     400: {
@@ -140,27 +289,53 @@ ERROR_EXAMPLES = {
             }
         }
     },
-    404: {
-        "description": "Not Found - Video not found",
+    401: {
+        "description": "Unauthorized - Authentication required",
         "content": {
             "application/json": {
                 "example": {
-                    "error": "video_not_found", 
-                    "message": "Video not found or is private",
-                    "details": {"video_id": "invalid_id"},
-                    "status_code": 404
+                    "error": "unauthorized",
+                    "message": "Authentication required for bulk operations",
+                    "status_code": 401
                 }
             }
         }
     },
     403: {
-        "description": "Forbidden - Access denied",
+        "description": "Forbidden - Access denied or rate limited",
         "content": {
             "application/json": {
                 "example": {
-                    "error": "access_denied",
-                    "message": "Video is age-restricted or region-blocked",
+                    "error": "rate_limited",
+                    "message": "Daily video processing limit exceeded for your tier",
+                    "details": {"tier": "free", "limit": 10},
                     "status_code": 403
+                }
+            }
+        }
+    },
+    404: {
+        "description": "Not Found - Resource not found",
+        "content": {
+            "application/json": {
+                "example": {
+                    "error": "job_not_found", 
+                    "message": "Bulk job not found or not accessible",
+                    "details": {"job_id": "invalid_id"},
+                    "status_code": 404
+                }
+            }
+        }
+    },
+    429: {
+        "description": "Too Many Requests - Rate limit exceeded",
+        "content": {
+            "application/json": {
+                "example": {
+                    "error": "too_many_requests",
+                    "message": "Rate limit exceeded. Please try again later.",
+                    "details": {"retry_after": 60},
+                    "status_code": 429
                 }
             }
         }
@@ -170,9 +345,9 @@ ERROR_EXAMPLES = {
         "content": {
             "application/json": {
                 "example": {
-                    "error": "transcription_failed",
-                    "message": "Failed to transcribe audio",
-                    "details": {"provider": "groq", "reason": "api_error"},
+                    "error": "bulk_job_failed",
+                    "message": "Failed to process bulk job",
+                    "details": {"job_id": "job_123", "reason": "service_error"},
                     "status_code": 500
                 }
             }

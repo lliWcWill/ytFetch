@@ -11,7 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .core.config import settings, ensure_temp_dir
+from .core.supabase import SupabaseClient, SupabaseError
 from .api.endpoints import router
+from .api.bulk_endpoints import router as bulk_router
 
 
 # Configure logging
@@ -38,6 +40,23 @@ async def lifespan(app: FastAPI):
         logger.warning("Groq API key not configured")
     if not settings.openai_api_key:
         logger.warning("OpenAI API key not configured")
+    
+    # Initialize Supabase if configured
+    try:
+        if SupabaseClient.is_configured():
+            SupabaseClient.initialize()
+            health = SupabaseClient.health_check()
+            if health["anon_client"]:
+                logger.info("Supabase anonymous client initialized successfully")
+            if health["service_client"]:
+                logger.info("Supabase service role client initialized successfully")
+            elif settings.supabase_service_role_key:
+                logger.warning("Supabase service role key provided but client failed to initialize")
+        else:
+            logger.info("Supabase not configured, skipping initialization")
+    except SupabaseError as e:
+        logger.error(f"Supabase initialization failed: {e}")
+        # Continue startup - Supabase is optional
     
     logger.info("Backend startup complete")
     
@@ -66,8 +85,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include API router
+# Include API routers
 app.include_router(router)
+app.include_router(bulk_router)
 
 
 @app.get("/")
@@ -81,7 +101,16 @@ async def root():
         "endpoints": {
             "health": "/health",
             "transcribe": "/api/v1/transcribe",
-            "video_info": "/api/v1/video-info/{video_id}"
+            "video_info": "/api/v1/video-info/{video_id}",
+            "supabase_health": "/api/v1/supabase/health",
+            "bulk_analyze": "/api/v1/bulk/analyze",
+            "bulk_create": "/api/v1/bulk/create",
+            "bulk_jobs": "/api/v1/bulk/jobs",
+            "bulk_job_status": "/api/v1/bulk/jobs/{job_id}",
+            "bulk_start": "/api/v1/bulk/jobs/{job_id}/start",
+            "bulk_cancel": "/api/v1/bulk/jobs/{job_id}/cancel",
+            "bulk_download": "/api/v1/bulk/jobs/{job_id}/download",
+            "bulk_delete": "/api/v1/bulk/jobs/{job_id}"
         }
     }
 
