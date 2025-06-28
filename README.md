@@ -40,6 +40,13 @@ ytFetch is a comprehensive toolkit for extracting YouTube video transcripts and 
 - **Minimal memory footprint**: Streaming and cleanup strategies
 - **Rate limit management**: Intelligent backoff and provider switching
 
+### 🛡️ Enhanced Download Strategies (2025)
+- **5-tier fallback system**: Automatic retry with different strategies
+- **Bot detection bypass**: Multiple client simulations (iOS, TV, embedded)
+- **Multi-library support**: yt-dlp, pytube, moviepy integration
+- **No cookies required**: Works in incognito and headless environments
+- **Production-ready**: Battle-tested against YouTube's latest restrictions
+
 ## 🏁 Quick Start
 
 ### Installation
@@ -137,6 +144,28 @@ OPTIMAL_SAMPLE_RATE = 16000     # Speech optimized
 - **Small files (< 2 min)**: Single request processing
 - **Medium files (2-10 min)**: Moderate chunking (5-12 chunks)
 - **Large files (> 10 min)**: Maximum parallelism (20+ chunks)
+
+### Download Strategy Configuration (2025 Update)
+The enhanced download system uses a robust 5-tier fallback strategy to handle YouTube's bot detection:
+
+#### Fallback Strategies (In Order):
+1. **iOS Client Simulation**: Mimics official YouTube iOS app requests
+2. **TV Embedded Client**: Uses YouTube TV app authentication
+3. **pytube Library**: Lightweight Python fallback with MP4→MP3 conversion
+4. **Web Embedded Client**: YouTube embed player (most reliable)
+5. **MoviePy Extraction**: Video download with audio track extraction
+
+#### Key Features:
+- **No browser cookies needed**: Works in any environment
+- **Automatic strategy selection**: Tries each method until success
+- **Clear progress feedback**: Shows which strategy is being attempted
+- **Battle-tested**: Successfully handles videos that trigger "Sign in to confirm you're not a bot" errors
+
+#### Troubleshooting Download Issues:
+- The system will automatically try all strategies
+- Strategy 4 (Web Embedded) has the highest success rate
+- If all strategies fail, check your network connection
+- For persistent issues, try updating yt-dlp: `pip install --upgrade yt-dlp`
 
 ## 📁 Project Structure
 

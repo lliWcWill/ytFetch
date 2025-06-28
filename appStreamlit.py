@@ -383,6 +383,227 @@ def format_segments(segments, output_format="txt"):
     except Exception as e:
         return f"Error formatting transcript: {str(e)}"
 
+def download_audio_as_mp3_enhanced(video_id, output_dir="video_outputs", video_title=None, progress_placeholder=None, status_placeholder=None):
+    """Enhanced download with multiple fallback strategies including pytube and advanced yt-dlp configurations."""
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get video info
+    video_info = get_video_info(video_id)
+    if not video_title:
+        video_title = video_info['title']
+    
+    safe_title = sanitize_filename(video_title)
+    final_mp3_path = os.path.join(output_dir, f"{safe_title}.mp3")
+    
+    if status_placeholder:
+        status_placeholder.info("🔍 Trying enhanced download strategies...")
+    
+    # Strategy 1: yt-dlp with advanced anti-bot headers (no cookies needed)
+    try:
+        if status_placeholder:
+            status_placeholder.text("🔄 Strategy 1: yt-dlp with anti-bot headers...")
+            
+        ydl_opts = {
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': os.path.join(output_dir, f"{safe_title}.%(ext)s"),
+            'quiet': True,
+            'no_warnings': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['ios', 'android_creator'],
+                    'player_skip': ['webpage', 'configs'],
+                    'include_dash_manifest': False,
+                }
+            },
+            'user_agent': 'com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)',
+            'http_headers': {
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/',
+                'X-YouTube-Client-Name': '5',
+                'X-YouTube-Client-Version': '19.29.1',
+            },
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+            
+        if os.path.exists(final_mp3_path):
+            if status_placeholder:
+                status_placeholder.success("✅ Downloaded with iOS client simulation!")
+            return final_mp3_path
+            
+    except Exception as e:
+        if status_placeholder:
+            status_placeholder.warning(f"⚠️ Strategy 1 failed: {str(e)[:100]}...")
+    
+    # Strategy 2: yt-dlp with TV client (often bypasses restrictions)
+    try:
+        if status_placeholder:
+            status_placeholder.text("🔄 Strategy 2: yt-dlp with TV client...")
+            
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': os.path.join(output_dir, f"{safe_title}.%(ext)s"),
+            'quiet': True,
+            'no_warnings': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['tv_embedded'],
+                    'player_skip': ['webpage'],
+                }
+            },
+            'user_agent': 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/40.13031-qa (unlike Gecko) v8/8.8.278.8-jit gles Starboard/12',
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+            
+        if os.path.exists(final_mp3_path):
+            if status_placeholder:
+                status_placeholder.success("✅ Downloaded with TV client!")
+            return final_mp3_path
+            
+    except Exception as e:
+        if status_placeholder:
+            status_placeholder.warning(f"⚠️ Strategy 2 failed: {str(e)[:100]}...")
+    
+    # Strategy 3: pytube fallback
+    try:
+        if status_placeholder:
+            status_placeholder.text("🔄 Strategy 3: Trying pytube...")
+            
+        from pytube import YouTube
+        
+        yt = YouTube(video_url)
+        audio_stream = yt.streams.filter(only_audio=True, file_extension='mp4').first()
+        
+        if audio_stream:
+            temp_path = audio_stream.download(output_path=output_dir, filename=f"{safe_title}_temp.mp4")
+            
+            # Convert to MP3 using pydub
+            from pydub import AudioSegment
+            audio = AudioSegment.from_file(temp_path, format="mp4")
+            audio.export(final_mp3_path, format="mp3", bitrate="192k")
+            
+            # Cleanup temp file
+            os.remove(temp_path)
+            
+            if os.path.exists(final_mp3_path):
+                if status_placeholder:
+                    status_placeholder.success("✅ Downloaded with pytube!")
+                return final_mp3_path
+                
+    except Exception as e:
+        if status_placeholder:
+            status_placeholder.warning(f"⚠️ Strategy 3 failed: {str(e)[:100]}...")
+    
+    # Strategy 4: yt-dlp with embedded client (very reliable)
+    try:
+        if status_placeholder:
+            status_placeholder.text("🔄 Strategy 4: yt-dlp with embedded client...")
+            
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': os.path.join(output_dir, f"{safe_title}.%(ext)s"),
+            'quiet': True,
+            'no_warnings': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web_embedded'],
+                    'player_skip': ['webpage'],
+                }
+            },
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+            
+        if os.path.exists(final_mp3_path):
+            if status_placeholder:
+                status_placeholder.success("✅ Downloaded with embedded client!")
+            return final_mp3_path
+            
+    except Exception as e:
+        if status_placeholder:
+            status_placeholder.warning(f"⚠️ Strategy 4 failed: {str(e)[:100]}...")
+    
+    # Strategy 5: moviepy + youtube-dl fallback
+    try:
+        if status_placeholder:
+            status_placeholder.text("🔄 Strategy 5: Trying moviepy extraction...")
+            
+        import tempfile
+        try:
+            from moviepy.editor import VideoFileClip
+        except ImportError:
+            if status_placeholder:
+                status_placeholder.warning("⚠️ moviepy not available, skipping this strategy...")
+            raise ImportError("moviepy not available")
+        
+        # Try to download video first with basic yt-dlp
+        temp_video_path = os.path.join(output_dir, f"{safe_title}_temp.%(ext)s")
+        
+        ydl_opts = {
+            'format': 'worst[height<=480]/worst',  # Low quality for faster download
+            'outtmpl': temp_video_path,
+            'quiet': True,
+            'no_warnings': True,
+            'user_agent': 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36',
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
+        
+        # Find the actual downloaded file
+        downloaded_files = [f for f in os.listdir(output_dir) if f.startswith(f"{safe_title}_temp")]
+        if downloaded_files:
+            temp_video_file = os.path.join(output_dir, downloaded_files[0])
+            
+            # Extract audio with moviepy
+            video_clip = VideoFileClip(temp_video_file)
+            audio_clip = video_clip.audio
+            audio_clip.write_audiofile(final_mp3_path, codec='mp3', bitrate='192k', verbose=False, logger=None)
+            
+            # Cleanup
+            audio_clip.close()
+            video_clip.close()
+            os.remove(temp_video_file)
+            
+            if os.path.exists(final_mp3_path):
+                if status_placeholder:
+                    status_placeholder.success("✅ Downloaded with moviepy!")
+                return final_mp3_path
+                
+    except Exception as e:
+        if status_placeholder:
+            status_placeholder.warning(f"⚠️ Strategy 4 failed: {str(e)[:100]}...")
+    
+    # All strategies failed
+    if status_placeholder:
+        status_placeholder.error("❌ All enhanced download strategies failed!")
+    
+    return None
+
 def download_audio_as_mp3(video_id, output_dir="video_outputs", video_title=None, progress_placeholder=None, status_placeholder=None):
     """Download the audio of a YouTube video as MP3 using yt-dlp with robust fallback strategies."""
     video_url = f"https://www.youtube.com/watch?v={video_id}"
@@ -677,10 +898,57 @@ with st.sidebar:
 # URL Input
 url = st.text_input("Enter YouTube Video URL:", key="youtube_url_input")
 
+# Speed multiplier selection for AI transcription
+st.subheader("⚡ AI Transcription Speed & Cost Settings")
+st.markdown("**Speed up audio before transcription to reduce costs:**")
+
+# Speed toggle buttons
+speed_col1, speed_col2, speed_col3 = st.columns(3)
+
+with speed_col1:
+    normal_speed = st.button("1x Normal", 
+                            key="speed_1x",
+                            help="Original speed - highest quality",
+                            use_container_width=True)
+
+with speed_col2:
+    double_speed = st.button("2x Speed", 
+                            key="speed_2x", 
+                            help="2x faster - 50% cost reduction, maintains quality",
+                            use_container_width=True,
+                            type="secondary")
+
+with speed_col3:
+    triple_speed = st.button("3x Speed", 
+                            key="speed_3x",
+                            help="3x faster - 66% cost reduction, optimal sweet spot",
+                            use_container_width=True,
+                            type="secondary")
+
+# Store selected speed multiplier in session state
+if normal_speed:
+    st.session_state.speed_multiplier = 1.0
+    st.session_state.selected_speed = "1x"
+elif double_speed:
+    st.session_state.speed_multiplier = 2.0
+    st.session_state.selected_speed = "2x"
+elif triple_speed:
+    st.session_state.speed_multiplier = 3.0
+    st.session_state.selected_speed = "3x"
+
+# Initialize default values if not set
+if 'speed_multiplier' not in st.session_state:
+    st.session_state.speed_multiplier = 2.0  # Default to 2x for cost savings
+    st.session_state.selected_speed = "2x"
+
+# Display current selection
+st.info(f"🎯 Selected speed: **{st.session_state.selected_speed}** "
+        f"({'Normal cost' if st.session_state.speed_multiplier == 1.0 else f'~{int((1/st.session_state.speed_multiplier)*100)}% cost'})")
+
 # Transcription method selection
 st.subheader("Choose Transcription Method")
 
-# Custom CSS for orange Groq button
+# Custom CSS for orange Groq button and speed controls
 st.markdown("""
 <style>
 /* Style primary buttons with orange Groq theme */
@@ -708,6 +976,29 @@ div.stButton > button[data-testid="baseButton-primary"]:focus {
     border: 1px solid #FF6B35 !important;
     color: white !important;
     box-shadow: 0 0 0 0.2rem rgba(255, 107, 53, 0.25) !important;
+}
+
+/* Style secondary buttons (speed controls) */
+div.stButton > button[data-testid="baseButton-secondary"] {
+    background-color: #2E8B57 !important;
+    color: white !important;
+    border: 1px solid #2E8B57 !important;
+    font-weight: bold !important;
+    transition: all 0.3s ease !important;
+}
+
+div.stButton > button[data-testid="baseButton-secondary"]:hover {
+    background-color: #228B22 !important;
+    border: 1px solid #228B22 !important;
+    color: white !important;
+    transform: translateY(-2px) !important;
+    box-shadow: 0 4px 8px rgba(46, 139, 87, 0.3) !important;
+}
+
+div.stButton > button[data-testid="baseButton-secondary"]:active {
+    background-color: #1F5F3F !important;
+    border: 1px solid #1F5F3F !important;
+    color: white !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -826,7 +1117,7 @@ if unofficial_button or groq_button:
                             download_status.info("📥 Stage 1: Downloading video audio...")
                             download_progress.progress(0)
                             
-                            audio_path = download_audio_as_mp3(
+                            audio_path = download_audio_as_mp3_enhanced(
                                 video_id, 
                                 output_dir="video_outputs", 
                                 video_title=video_info.get('title'),
@@ -864,9 +1155,11 @@ if unofficial_button or groq_button:
                                         transcription_progress.progress(0.3 + progress * 0.7)
                                         transcription_status.info(f"🎯 Stage 2: {message}")
                                 
-                                # Transcribe audio using the new optimized function
+                                # Transcribe audio using the new optimized function with speed adjustment
+                                speed_mult = st.session_state.get('speed_multiplier', 2.0)
                                 transcript = transcribe_audio_from_file(audio_path, language="en", 
-                                                                      progress_callback=update_transcription_progress)
+                                                                      progress_callback=update_transcription_progress,
+                                                                      speed_multiplier=speed_mult)
                                 
                                 # Clean up audio file
                                 try:

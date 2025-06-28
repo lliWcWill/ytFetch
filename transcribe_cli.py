@@ -9,7 +9,7 @@ import sys
 import os
 from pathlib import Path
 from audio_transcriber import transcribe_audio_from_file
-from appStreamlit import get_video_id_from_url, fetch_transcript_segments, download_audio_as_mp3, get_video_info, format_segments
+from appStreamlit import get_video_id_from_url, fetch_transcript_segments, download_audio_as_mp3_enhanced, get_video_info, format_segments
 
 
 def transcribe_url(url, output_format="txt", provider="groq"):
@@ -42,7 +42,21 @@ def transcribe_url(url, output_format="txt", provider="groq"):
     
     # Fallback to audio transcription
     print("🎵 Downloading audio for transcription...")
-    audio_path = download_audio_as_mp3(video_id)
+    
+    # Use enhanced download with status messages
+    class CLIStatusPlaceholder:
+        def info(self, msg): print(f"ℹ️  {msg}")
+        def text(self, msg): print(f"   {msg}")
+        def warning(self, msg): print(f"⚠️  {msg}")
+        def success(self, msg): print(f"✅ {msg}")
+        def error(self, msg): print(f"❌ {msg}")
+    
+    status = CLIStatusPlaceholder()
+    audio_path = download_audio_as_mp3_enhanced(
+        video_id, 
+        video_title=video_info.get('title'),
+        status_placeholder=status
+    )
     
     if not audio_path:
         print("❌ Error: Could not download audio")
