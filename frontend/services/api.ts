@@ -14,6 +14,7 @@ export interface TranscribeRequest {
   method: TranscriptionMethod;
   output_format?: OutputFormat;
   language?: string;
+  model?: string;
 }
 
 export interface TranscribeResponse {
@@ -83,6 +84,22 @@ export class ApiValidationError extends Error {
   }
 }
 
+export class TierLimitError extends Error {
+  constructor(
+    message: string,
+    public tierInfo?: {
+      currentTier: string;
+      requiredTier?: string;
+      limitType?: 'videos' | 'jobs' | 'concurrent' | 'duration';
+      currentUsage?: number;
+      limit?: number;
+    }
+  ) {
+    super(message);
+    this.name = 'TierLimitError';
+  }
+}
+
 // Utility Functions
 
 /**
@@ -124,6 +141,7 @@ async function createHeaders(includeContentType = true): Promise<Record<string, 
   return await createAuthHeaders(includeContentType);
 }
 
+
 /**
  * Handles fetch responses with proper error handling and type safety
  */
@@ -133,6 +151,27 @@ async function handleResponse<T>(response: Response): Promise<T> {
     const { handleAuthError } = await import('@/lib/auth-token');
     handleAuthError();
     throw new ApiHttpError('Authentication required', 401, 'Unauthorized', null);
+  }
+
+  // Handle 402 Payment Required - tier limit exceeded
+  if (response.status === 402) {
+    let errorData: any;
+    try {
+      errorData = await response.json();
+    } catch {
+      errorData = { error: 'Payment required', message: 'Tier limit exceeded' };
+    }
+    
+    throw new TierLimitError(
+      errorData.message || 'Tier limit exceeded',
+      {
+        currentTier: errorData.current_tier || 'free',
+        requiredTier: errorData.required_tier,
+        limitType: errorData.limit_type,
+        currentUsage: errorData.current_usage,
+        limit: errorData.limit
+      }
+    );
   }
 
   // Check if response is ok
@@ -164,7 +203,7 @@ async function handleResponse<T>(response: Response): Promise<T> {
 /**
  * Makes a typed API request with error handling
  */
-async function apiRequest<T>(
+export async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
@@ -206,7 +245,7 @@ async function apiRequest<T>(
  * Starts a transcription job for a YouTube video
  * @param url - YouTube video URL
  * @param clientId - Unique client identifier (UUID v4)
- * @param options - Optional transcription parameters including method, output_format, and language
+ * @param options - Optional transcription parameters including method, output_format, language, and model
  * @returns Promise<TranscribeResponse>
  */
 export async function startTranscriptionJob(
@@ -216,6 +255,7 @@ export async function startTranscriptionJob(
     output_format?: OutputFormat;
     language?: string;
     method?: TranscriptionMethod;
+    model?: string;
   }
 ): Promise<TranscribeResponse> {
   // Validate required parameters
@@ -243,7 +283,8 @@ export async function startTranscriptionJob(
     client_id: clientId,
     method,
     output_format: options?.output_format || 'txt',
-    ...options,
+    language: options?.language,
+    model: options?.model,
   };
 
   try {
@@ -347,6 +388,68 @@ export async function healthCheck(): Promise<{
   return await apiRequest('/api/v1/health');
 }
 
+// Stripe API Functions
+
+/**
+ * Creates a Stripe checkout session
+ * @param tier - The tier to subscribe to
+ * @param successUrl - URL to redirect to after successful payment
+ * @param cancelUrl - URL to redirect to if payment is canceled
+ * @returns Promise with session information
+ */
+export async function createStripeCheckoutSession(
+  tier: 'pro' | 'enterprise',
+  successUrl: string,
+  cancelUrl: string
+): Promise<{ sessionId: string; url: string }> {
+  return await apiRequest('/api/v1/stripe/create-checkout-session', {
+    method: 'POST',
+    body: JSON.stringify({
+      tier,
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+    }),
+  });
+}
+
+/**
+ * Creates a Stripe customer portal session
+ * @param returnUrl - URL to return to after portal session
+ * @returns Promise with portal URL
+ */
+export async function createStripePortalSession(
+  returnUrl: string
+): Promise<{ url: string }> {
+  return await apiRequest('/api/v1/stripe/create-portal-session', {
+    method: 'POST',
+    body: JSON.stringify({
+      return_url: returnUrl,
+    }),
+  });
+}
+
+/**
+ * Gets available Stripe prices
+ * @returns Promise with price information
+ */
+export async function getStripePrices(): Promise<{ prices: any[] }> {
+  return await apiRequest('/api/v1/stripe/prices');
+}
+
+/**
+ * Gets customer subscription information
+ * @returns Promise with customer info
+ */
+export async function getStripeCustomerInfo(): Promise<{
+  hasSubscription: boolean;
+  currentTier?: string;
+  subscriptionStatus?: string;
+  subscriptionEndDate?: string;
+  cancelAtPeriodEnd?: boolean;
+}> {
+  return await apiRequest('/api/v1/stripe/customer-info');
+}
+
 /**
  * Downloads the ZIP file of completed transcripts for a bulk job
  * @param jobId - The job ID to download
@@ -423,6 +526,7 @@ export function createTranscriptionRequest(
     output_format?: OutputFormat;
     language?: string;
     client_id?: string;
+    model?: string;
   }
 ): TranscribeRequest {
   return {
@@ -431,6 +535,7 @@ export function createTranscriptionRequest(
     method,
     output_format: options?.output_format || 'txt',
     ...(options?.language && { language: options.language }),
+    ...(options?.model && { model: options.model }),
   };
 }
 
@@ -450,4 +555,5 @@ export const ApiErrors = {
   ApiNetworkError,
   ApiHttpError,
   ApiValidationError,
+  TierLimitError,
 };

@@ -47,6 +47,11 @@ class TranscribeRequest(BaseModel):
         max_length=255,
         examples=["client_123", "browser_session_abc"]
     )
+    model: Optional[str] = Field(
+        None,
+        description="Whisper model to use for Groq transcription",
+        examples=["whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"]
+    )
 
 
 class ProgressUpdate(BaseModel):
