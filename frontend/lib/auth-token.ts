@@ -1,6 +1,31 @@
 import { supabase } from '@/providers/AuthProvider'
 
 /**
+ * Gets or creates a guest session ID for unauthenticated users
+ */
+export function getGuestSessionId(): string {
+  const GUEST_SESSION_KEY = 'ytfetch-guest-session'
+  
+  // Check if we already have a guest session ID
+  let sessionId = localStorage.getItem(GUEST_SESSION_KEY)
+  
+  if (!sessionId) {
+    // Generate a new session ID
+    sessionId = crypto.randomUUID ? crypto.randomUUID() : 
+      'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        const r = Math.random() * 16 | 0
+        const v = c === 'x' ? r : (r & 0x3 | 0x8)
+        return v.toString(16)
+      })
+    
+    // Store it for future use
+    localStorage.setItem(GUEST_SESSION_KEY, sessionId)
+  }
+  
+  return sessionId
+}
+
+/**
  * Gets the current auth token from Supabase session
  * This is more reliable than parsing localStorage directly
  */
@@ -36,6 +61,9 @@ export async function createAuthHeaders(includeContentType = true): Promise<Reco
   const token = await getAuthToken()
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
+  } else {
+    // For guest users, add the guest session ID
+    headers['X-Guest-Session-ID'] = getGuestSessionId()
   }
   
   return headers

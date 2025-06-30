@@ -1,61 +1,58 @@
 'use client'
 
-import { createContext, useContext, useEffect, useState, useCallback, ReactNode, use } from 'react'
-import { createClient, type AuthChangeEvent, type Session, type User } from '@supabase/supabase-js'
+import { createContext, useContext, useEffect, useState, useCallback, ReactNode } from 'react'
+import { type AuthChangeEvent, type Session, type User } from '@supabase/supabase-js'
 import { useRouter } from 'next/navigation'
+import { createClient } from '@/utils/supabase/client'
 import type { Database } from '@/types/supabase'
 
-// Environment variables validation
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Missing Supabase environment variables')
-}
-
-// Create Supabase client with modern configuration
-const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: true,
-    flowType: 'pkce',
-    storage: {
-      getItem: (key: string) => {
-        if (typeof window !== 'undefined') {
-          return window.localStorage.getItem(key)
-        }
-        return null
-      },
-      setItem: (key: string, value: string) => {
-        if (typeof window !== 'undefined') {
-          window.localStorage.setItem(key, value)
-        }
-      },
-      removeItem: (key: string) => {
-        if (typeof window !== 'undefined') {
-          window.localStorage.removeItem(key)
-        }
-      }
-    }
-  },
-  global: {
-    headers: {
-      'X-Client-Info': 'ytfetch-frontend-auth'
-    }
-  }
-})
+// Create Supabase client using the new SSR approach
+const supabase = createClient()
 
 // Types
+interface UserProfile {
+  id: string
+  tier_id: string
+  videos_processed_this_month: number
+  jobs_created_this_month: number
+  total_videos_processed: number
+  total_jobs_created: number
+  subscription_status: 'active' | 'cancelled' | 'suspended' | 'expired'
+  subscription_expires_at: string | null
+  created_at: string
+  updated_at: string
+  last_active_at: string
+  tier?: UserTier
+}
+
+interface UserTier {
+  id: string
+  name: string
+  display_name: string
+  description: string | null
+  max_videos_per_job: number
+  max_jobs_per_month: number
+  max_concurrent_jobs: number
+  max_video_duration_minutes: number
+  priority_processing: boolean
+  webhook_support: boolean
+  api_access: boolean
+  price_monthly: number
+  price_yearly: number
+  is_active: boolean
+}
+
 interface AuthContextType {
   user: User | null
   session: Session | null
+  profile: UserProfile | null
   loading: boolean
   error: string | null
   signInWithGoogle: () => Promise<{ error?: any }>
   signOut: () => Promise<void>
   clearError: () => void
   refreshSession: () => Promise<void>
+  refreshProfile: () => Promise<void>
 }
 
 interface AuthProviderProps {
@@ -65,6 +62,7 @@ interface AuthProviderProps {
 interface AuthStateType {
   user: User | null
   session: Session | null
+  profile: UserProfile | null
   loading: boolean
   error: string | null
 }
@@ -89,6 +87,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const [authState, setAuthState] = useState<AuthStateType>({
     user: null,
     session: null,
+    profile: null,
     loading: true,
     error: null
   })
@@ -98,14 +97,42 @@ export function AuthProvider({ children }: AuthProviderProps) {
     setAuthState(prev => ({ ...prev, error: null }))
   }, [])
 
+  // Fetch user profile with tier information
+  const fetchUserProfile = useCallback(async (userId: string): Promise<UserProfile | null> => {
+    try {
+      const { data: profile, error } = await supabase
+        .from('user_profiles')
+        .select('*')
+        .eq('id', userId)
+        .single()
+
+      if (error) {
+        console.error('Error fetching user profile:', error)
+        return null
+      }
+
+      return profile as UserProfile
+    } catch (error) {
+      console.error('Failed to fetch user profile:', error)
+      return null
+    }
+  }, [])
+
   // Handle auth state changes
-  const handleAuthChange = useCallback((event: AuthChangeEvent, session: Session | null) => {
+  const handleAuthChange = useCallback(async (event: AuthChangeEvent, session: Session | null) => {
     console.log('Auth event:', event, session?.user?.email)
+    
+    // Fetch profile if user is signed in
+    let profile: UserProfile | null = null
+    if (session?.user) {
+      profile = await fetchUserProfile(session.user.id)
+    }
     
     setAuthState(prev => ({
       ...prev,
       user: session?.user ?? null,
       session,
+      profile,
       loading: false,
       error: null
     }))
@@ -119,8 +146,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
         router.push(redirectTo)
         break
       case 'SIGNED_OUT':
-        // Clear any cached data and redirect to login
-        router.push('/login')
+        // Don't redirect on sign out - allow guest access
+        console.log('User signed out - guest mode active')
         break
       case 'TOKEN_REFRESHED':
         console.log('Token refreshed successfully')
@@ -129,7 +156,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         console.log('User profile updated')
         break
     }
-  }, [router])
+  }, [router, fetchUserProfile])
 
   // Initialize auth state and set up listener
   useEffect(() => {
@@ -153,9 +180,16 @@ export function AuthProvider({ children }: AuthProviderProps) {
         }
 
         if (mounted) {
+          // Fetch profile if user is authenticated
+          let profile: UserProfile | null = null
+          if (session?.user) {
+            profile = await fetchUserProfile(session.user.id)
+          }
+          
           setAuthState({
             user: session?.user ?? null,
             session,
+            profile,
             loading: false,
             error: null
           })
@@ -181,17 +215,21 @@ export function AuthProvider({ children }: AuthProviderProps) {
       mounted = false
       subscription.unsubscribe()
     }
-  }, [handleAuthChange])
+  }, [handleAuthChange, fetchUserProfile])
 
   // Sign in with Google
   const signInWithGoogle = useCallback(async () => {
     clearError()
     
     try {
+      // Get the stored redirect path
+      const storedRedirect = sessionStorage.getItem('auth-redirect-to')
+      const redirectParam = storedRedirect ? `?next=${encodeURIComponent(storedRedirect)}` : ''
+      
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: `${window.location.origin}/auth/callback`,
+          redirectTo: `${window.location.origin}/auth/callback${redirectParam}`,
           queryParams: {
             access_type: 'offline',
             prompt: 'consent',
@@ -230,6 +268,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       setAuthState({
         user: null,
         session: null,
+        profile: null,
         loading: false,
         error: null
       })
@@ -258,10 +297,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
       }
 
       if (session) {
+        // Fetch profile after session refresh
+        const profile = await fetchUserProfile(session.user.id)
+        
         setAuthState(prev => ({
           ...prev,
           user: session.user,
           session,
+          profile,
           error: null
         }))
       }
@@ -269,18 +312,34 @@ export function AuthProvider({ children }: AuthProviderProps) {
       const errorMessage = `Session refresh error: ${error instanceof Error ? error.message : 'Unknown error'}`
       setAuthState(prev => ({ ...prev, error: errorMessage }))
     }
-  }, [])
+  }, [fetchUserProfile])
+
+  // Refresh user profile
+  const refreshProfile = useCallback(async () => {
+    if (!authState.user) return
+
+    try {
+      const profile = await fetchUserProfile(authState.user.id)
+      if (profile) {
+        setAuthState(prev => ({ ...prev, profile }))
+      }
+    } catch (error) {
+      console.error('Error refreshing profile:', error)
+    }
+  }, [authState.user, fetchUserProfile])
 
   // Context value
   const value: AuthContextType = {
     user: authState.user,
     session: authState.session,
+    profile: authState.profile,
     loading: authState.loading,
     error: authState.error,
     signInWithGoogle,
     signOut,
     clearError,
-    refreshSession
+    refreshSession,
+    refreshProfile
   }
 
   return (

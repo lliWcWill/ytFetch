@@ -144,27 +144,72 @@ async def get_guest_usage(
         from ..services.guest_service import guest_service
         usage_summary = await guest_service.get_guest_usage_summary(user.session_id)
         
+        # Log the usage summary for debugging
+        logger.info(f"Guest usage summary for {user.session_id}: {usage_summary}")
+        
         return {
             "is_guest": True,
             "session_id": user.session_id,
-            "usage": usage_summary["usage"],
+            "usage": usage_summary.get("usage", {
+                "unofficial": {"used": 0, "limit": 10, "remaining": 10},
+                "groq": {"used": 0, "limit": 10, "remaining": 10},
+                "bulk": {"used": 0, "limit": 50, "remaining": 50}
+            }),
             "first_use_at": usage_summary.get("first_use_at"),
             "last_use_at": usage_summary.get("last_use_at"),
+            "is_new_guest": usage_summary.get("is_new_guest", True),
             "message": "Sign up for a free account to get more transcriptions and features!"
         }
     else:
         # Get authenticated user usage
         usage_summary = await usage_service.get_usage_summary(user.id)
         
-        return {
-            "is_guest": False,
-            "user_id": user.id,
-            "email": user.email,
-            "tier": usage_summary.get("tier", "free"),
-            "usage": usage_summary.get("usage", {}),
-            "limits": usage_summary.get("limits", {}),
-            "subscription": usage_summary.get("subscription", {})
-        }
+        # Transform authenticated user usage to match guest format for frontend compatibility
+        # This ensures the frontend GuestUsageDisplay component works for both guests and free tier users
+        user_tier = usage_summary.get("tier", "free")
+        
+        if user_tier == "free":
+            # For free tier users, provide usage in the same format as guests
+            # Map the authenticated user's usage to the guest format
+            jobs_usage = usage_summary.get("usage", {}).get("jobs_created", {})
+            videos_usage = usage_summary.get("usage", {}).get("videos_processed", {})
+            
+            return {
+                "is_guest": False,
+                "user_id": user.id,
+                "email": user.email,
+                "tier": user_tier,
+                "usage": {
+                    "unofficial": {
+                        "used": videos_usage.get("used", 0),
+                        "limit": min(videos_usage.get("limit", 20), 20),  # Cap at 20 for free tier
+                        "remaining": min(videos_usage.get("remaining", 20), 20)
+                    },
+                    "groq": {
+                        "used": jobs_usage.get("used", 0),
+                        "limit": min(jobs_usage.get("limit", 20), 20),  # Cap at 20 for free tier
+                        "remaining": min(jobs_usage.get("remaining", 20), 20)
+                    },
+                    "bulk": {
+                        "used": 0,
+                        "limit": 100,
+                        "remaining": 100
+                    }
+                },
+                "limits": usage_summary.get("limits", {}),
+                "subscription": usage_summary.get("subscription", {})
+            }
+        else:
+            # For paid tiers, return the original structure (component won't display for them anyway)
+            return {
+                "is_guest": False,
+                "user_id": user.id,
+                "email": user.email,
+                "tier": user_tier,
+                "usage": usage_summary.get("usage", {}),
+                "limits": usage_summary.get("limits", {}),
+                "subscription": usage_summary.get("subscription", {})
+            }
 
 
 @router.get("/health", response_model=HealthResponse)

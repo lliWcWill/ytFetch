@@ -220,7 +220,7 @@ class BulkJobResponse(BaseModel):
     """Response schema for bulk job information."""
     
     job_id: str = Field(..., description="Unique job identifier")
-    user_id: str = Field(..., description="User identifier")
+    user_id: Optional[str] = Field(None, description="User identifier")
     source_url: str = Field(..., description="Source playlist/channel URL")
     transcript_method: str = Field(..., description="Transcription method")
     output_format: str = Field(..., description="Output format")

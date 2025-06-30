@@ -14,6 +14,8 @@ from .core.config import settings, ensure_temp_dir
 from .core.supabase import SupabaseClient, SupabaseError
 from .api.endpoints import router
 from .api.bulk_endpoints import router as bulk_router
+from .api.stripe_endpoints import router as stripe_router
+from .api.token_endpoints import router as token_router
 
 
 # Configure logging
@@ -88,6 +90,8 @@ app.add_middleware(
 # Include API routers
 app.include_router(router)
 app.include_router(bulk_router)
+app.include_router(stripe_router)
+app.include_router(token_router)
 
 
 @app.get("/")
@@ -110,7 +114,11 @@ async def root():
             "bulk_start": "/api/v1/bulk/jobs/{job_id}/start",
             "bulk_cancel": "/api/v1/bulk/jobs/{job_id}/cancel",
             "bulk_download": "/api/v1/bulk/jobs/{job_id}/download",
-            "bulk_delete": "/api/v1/bulk/jobs/{job_id}"
+            "bulk_delete": "/api/v1/bulk/jobs/{job_id}",
+            "stripe_checkout": "/api/v1/stripe/checkout-session",
+            "stripe_portal": "/api/v1/stripe/portal-session",
+            "stripe_prices": "/api/v1/stripe/prices",
+            "stripe_subscription_info": "/api/v1/stripe/subscription-info"
         }
     }
 

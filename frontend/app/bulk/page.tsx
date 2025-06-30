@@ -3,6 +3,7 @@
 import { useState, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ArrowLeft, ListVideo, Zap, Play, Users } from 'lucide-react'
@@ -17,19 +18,26 @@ import {
   type TranscriptMethod,
   type OutputFormat
 } from '@/services/bulkApi'
-import { ApiValidationError, ApiNetworkError, ApiHttpError } from '@/services/api'
+import { ApiValidationError, ApiNetworkError, ApiHttpError, TierLimitError } from '@/services/api'
+import { UsageDisplay } from '@/components/UsageDisplay'
+// import { UpgradePrompt } from '@/components/UpgradePrompt' // Removed - using token-based system
 import { useSupabaseRealtime } from '@/hooks/useSupabaseRealtime'
+import { cn } from '@/lib/utils'
+import { checkGuestLimit, incrementGuestUsage, getRemainingGuestUsage, GUEST_LIMITS } from '@/utils/guestLimits'
 
 type PageState = 'form' | 'selection' | 'job-created' | 'processing'
 
 export default function BulkPage() {
-  const { user, loading } = useAuth()
+  const { user, loading, profile } = useAuth()
+  const router = useRouter()
   const [pageState, setPageState] = useState<PageState>('form')
   const [analysis, setAnalysis] = useState<BulkAnalyzeResponse | null>(null)
   const [selectedVideos, setSelectedVideos] = useState<string[]>([])
   const [currentJob, setCurrentJob] = useState<BulkJobResponse | null>(null)
   const [isCreatingJob, setIsCreatingJob] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // const [showUpgradePrompt, setShowUpgradePrompt] = useState(false) // Removed - using token-based system
+  // const [upgradeReason, setUpgradeReason] = useState<'videos' | 'jobs' | 'concurrent' | 'duration'>('videos')
   const [formParams, setFormParams] = useState<{
     url: string
     transcriptMethod: TranscriptMethod
@@ -38,11 +46,20 @@ export default function BulkPage() {
   } | null>(null)
 
   // Handle analysis completion
-  const handleAnalyze = useCallback((analysisResult: BulkAnalyzeResponse) => {
+  const handleAnalyze = useCallback((analysisResult: BulkAnalyzeResponse, params?: {
+    url: string
+    transcriptMethod: TranscriptMethod
+    outputFormat: OutputFormat
+    maxVideos?: number
+  }) => {
     setAnalysis(analysisResult)
     setSelectedVideos(analysisResult.videos.map(v => v.video_id)) // Select all by default
     setPageState('selection')
     setError(null)
+    // Store form params if provided
+    if (params) {
+      setFormParams(params)
+    }
   }, [])
 
   // Handle real-time video task updates
@@ -82,10 +99,13 @@ export default function BulkPage() {
     outputFormat: OutputFormat
     maxVideos?: number
   }) => {
+    console.log('handleCreateJob called with params:', params, 'pageState:', pageState)
+    
     if (pageState === 'form') {
       // Store params and show message to analyze first
       setFormParams(params)
-      setError('Please analyze the source first to select videos.')
+      setError('Please click "Analyze Source" first to scan the playlist/channel and select videos for transcription.')
+      console.log('User tried to create job without analyzing first')
       return
     }
 
@@ -94,10 +114,14 @@ export default function BulkPage() {
       return
     }
 
-    // Check tier limits
-    if (analysis.tier_limits && selectedVideos.length > analysis.tier_limits.max_videos_per_job) {
-      setError(`Selection exceeds your tier limit of ${analysis.tier_limits.max_videos_per_job} videos per job.`)
-      return
+    // Token-based system - no tier limits, users pay per use
+    // Guest users can use up to 60 videos in bulk
+    if (!user) {
+      const limitCheck = checkGuestLimit('bulkJobs')
+      if (!limitCheck.allowed) {
+        setError(`You've reached your free daily limit (${limitCheck.limit} bulk job). Sign in to continue!`)
+        return
+      }
     }
 
     setIsCreatingJob(true)
@@ -113,13 +137,26 @@ export default function BulkPage() {
 
       setCurrentJob(job)
       setPageState('job-created')
+      
+      // Increment guest usage if not authenticated
+      if (!user) {
+        incrementGuestUsage('bulkJobs')
+      }
     } catch (err) {
-      if (err instanceof ApiValidationError) {
+      if (err instanceof TierLimitError) {
+        // Token-based system - just show the error
+        setError(`Limit reached: ${err.message}`)
+      } else if (err instanceof ApiValidationError) {
         setError(`Validation Error: ${err.message}`)
       } else if (err instanceof ApiNetworkError) {
         setError(`Network Error: ${err.message}. Please check your connection and try again.`)
       } else if (err instanceof ApiHttpError) {
-        setError(`Server Error: ${err.message} (Status: ${err.status})`)
+        // Check if it's a guest limit error
+        if (err.status === 401 && err.response?.error_code === 'guest_limit_exceeded') {
+          setError(`You've reached your free daily bulk job limit. Sign in to continue!`)
+        } else {
+          setError(`Server Error: ${err.message} (Status: ${err.status})`)
+        }
       } else {
         setError(`Unexpected Error: ${err instanceof Error ? err.message : 'Failed to create bulk job'}`)
       }
@@ -160,48 +197,7 @@ export default function BulkPage() {
     setError(null)
   }, [])
 
-  // Show loading spinner while checking auth
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center space-y-4">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500"></div>
-          <p className="text-sm text-muted-foreground">Loading...</p>
-        </div>
-      </div>
-    )
-  }
-
-  // Redirect to login if not authenticated
-  if (!user) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-4">
-        <div className="text-center space-y-6 max-w-md">
-          <div className="mx-auto w-16 h-16 bg-gradient-to-r from-blue-500 to-purple-500 rounded-xl flex items-center justify-center">
-            <span className="text-2xl font-bold text-white">yt</span>
-          </div>
-          <div className="space-y-2">
-            <h1 className="text-2xl font-semibold">Bulk Transcription Access</h1>
-            <p className="text-muted-foreground">Sign in to access bulk playlist and channel transcription features</p>
-            <div className="flex items-center justify-center gap-2 text-sm">
-              <Badge variant="secondary">Pro Feature</Badge>
-            </div>
-          </div>
-          <Button 
-            onClick={() => {
-              // Store current path for redirect after login
-              sessionStorage.setItem('auth-redirect-to', '/bulk')
-              window.location.href = '/login'
-            }}
-            size="lg" 
-            className="w-full bg-gradient-to-r from-blue-500 to-purple-500 text-white hover:from-blue-600 hover:to-purple-600"
-          >
-            Sign In for Bulk Access
-          </Button>
-        </div>
-      </div>
-    )
-  }
+  // App is now open access - allow everyone to try bulk processing
 
   return (
     <div className="min-h-screen bg-background relative overflow-hidden">
@@ -248,15 +244,40 @@ export default function BulkPage() {
             animate={{ opacity: 1, y: 0 }}
             className="space-y-4"
           >
-            <h1 className="text-5xl font-bold tracking-tight">
-              <span className="text-foreground">Bulk</span>
-              <span className="text-primary"> Transcription</span>
-            </h1>
+            <div className="flex items-center justify-center gap-3 mb-4">
+              <h1 className="text-5xl font-bold tracking-tight">
+                <span className="text-foreground">Bulk</span>
+                <span className="text-primary"> Transcription</span>
+              </h1>
+              {profile?.tier && (
+                <Badge 
+                  variant={profile.tier.name === 'free' ? 'secondary' : 'default'}
+                  className={cn(
+                    "text-sm",
+                    profile.tier.name === 'pro' && 'bg-blue-500 hover:bg-blue-600',
+                    profile.tier.name === 'enterprise' && 'bg-purple-500 hover:bg-purple-600'
+                  )}
+                >
+                  {profile.tier.display_name}
+                </Badge>
+              )}
+            </div>
             <p className="text-xl text-muted-foreground leading-relaxed">
               Transcribe entire YouTube playlists and channels with{' '}
               <span className="text-primary font-semibold">lightning speed</span>.
               Process dozens of videos in a single job.
             </p>
+            
+            {/* Quick Instructions */}
+            <div className="mt-6 p-4 bg-muted/30 rounded-lg max-w-2xl mx-auto">
+              <p className="text-sm text-muted-foreground">
+                <strong>How it works:</strong> 
+                <span className="text-primary font-medium">Step 1:</span> Enter a YouTube playlist or channel URL → 
+                <span className="text-primary font-medium">Step 2:</span> Click "Analyze Source" to scan available videos → 
+                <span className="text-primary font-medium">Step 3:</span> Select up to {GUEST_LIMITS.maxBulkVideos} videos (free tier) → 
+                <span className="text-primary font-medium">Step 4:</span> Click "Create Bulk Job" to start transcription
+              </p>
+            </div>
             <div className="flex items-center justify-center gap-6 text-sm text-muted-foreground">
               <div className="flex items-center gap-2">
                 <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
@@ -278,6 +299,46 @@ export default function BulkPage() {
       {/* Main Content */}
       <div className="container mx-auto px-4 pb-12">
         <div className="max-w-6xl mx-auto space-y-8">
+
+          {/* Guest Usage Display */}
+          {!user && pageState === 'form' && (
+            <motion.div
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-950/20 dark:to-purple-950/20 rounded-lg p-4 text-center"
+            >
+              <p className="text-sm text-muted-foreground">
+                Free tier: {getRemainingGuestUsage().bulkJobs} bulk job remaining today (max {GUEST_LIMITS.maxBulkVideos} videos)
+                {' • '}
+                <button 
+                  onClick={() => {
+                    sessionStorage.setItem('auth-redirect-to', '/bulk')
+                    router.push('/login')
+                  }}
+                  className="text-primary hover:underline font-medium"
+                >
+                  Sign in for unlimited access
+                </button>
+              </p>
+            </motion.div>
+          )}
+          
+          {/* Usage Display for authenticated users */}
+          {user && profile && pageState === 'form' && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.3 }}
+              className="max-w-lg mx-auto"
+            >
+              <UsageDisplay 
+                onUpgradeClick={() => {
+                  setUpgradeReason('jobs')
+                  setShowUpgradePrompt(true)
+                }}
+              />
+            </motion.div>
+          )}
 
           {/* Progress Indicator */}
           <div className="flex items-center justify-center gap-4">
@@ -531,6 +592,8 @@ export default function BulkPage() {
           </div>
         </div>
       </div>
+
+      {/* Token-based system - no upgrade prompts needed */}
     </div>
   )
 }

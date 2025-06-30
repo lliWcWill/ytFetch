@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 // import { v4 as uuidv4 } from 'uuid' // Will be used in Phase 4
 import { URLInputForm } from '@/components/URLInputForm'
@@ -43,6 +43,7 @@ export default function HomePage() {
   const [tokenBalance, setTokenBalance] = useState<UserTokenBalance | null>(null)
   const [activeSection, setActiveSection] = useState<string>('')
   const [guestUsage, setGuestUsage] = useState<GuestUsageResponse | null>(null)
+  const [guestUsageLoading, setGuestUsageLoading] = useState(true)
   
   // Handle redirect after auth and load token balance / guest usage
   useEffect(() => {
@@ -56,13 +57,25 @@ export default function HomePage() {
       // Load token balance
       tokenService.getTokenBalance()
         .then(setTokenBalance)
-        .catch(err => console.error('Failed to load token balance:', err))
+        .catch(err => {
+          // Don't log error for unauthenticated users
+          if (err.message !== 'Authentication required') {
+            console.error('Failed to load token balance:', err)
+          }
+        })
     }
     
     // Load usage (guest or authenticated)
+    setGuestUsageLoading(true)
     getUsage()
-      .then(setGuestUsage)
-      .catch(err => console.error('Failed to load usage:', err))
+      .then(usage => {
+        setGuestUsage(usage)
+        setGuestUsageLoading(false)
+      })
+      .catch(err => {
+        console.error('Failed to load usage:', err)
+        setGuestUsageLoading(false)
+      })
   }, [user, router])
   
   // Track active section for navigation highlighting
@@ -110,16 +123,54 @@ export default function HomePage() {
   const [transcriptFormat, setTranscriptFormat] = useState<'txt' | 'srt' | 'vtt' | 'json'>('txt')
   const [error, setError] = useState<string | null>(null)
   const [videoTitle, setVideoTitle] = useState<string>('')
+  const [audioGatheringMessageIndex, setAudioGatheringMessageIndex] = useState<number>(0)
+
+  // Audio gathering messages for rotation
+  const audioGatheringMessages = useMemo(() => [
+    "Gathering audio...",
+    "Extracting sound waves...",
+    "Playing with audio frequencies...",
+    "Taking the sound waves apart...",
+    "Reconfiguring audio for transcription...",
+    "Preparing audio data..."
+  ], [])
+
+  // Rotate audio gathering messages
+  useEffect(() => {
+    if (progress.stage === 'downloading' && processingMethod === 'groq') {
+      const interval = setInterval(() => {
+        setAudioGatheringMessageIndex((prev) => (prev + 1) % audioGatheringMessages.length)
+      }, 2000) // Rotate every 2 seconds
+      
+      return () => clearInterval(interval)
+    }
+  }, [progress.stage, processingMethod, audioGatheringMessages.length])
 
   // Handle WebSocket message
   const handleSocketMessage = useCallback((message: any) => {
     console.log('WebSocket message received:', message)
     
+    // Determine the appropriate message based on stage and method
+    let displayMessage = message.message || ''
+    
+    // For Groq method during downloading stage, use rotating audio gathering messages
+    if (processingMethod === 'groq' && message.stage === 'downloading' && !message.message?.includes('Audio downloaded')) {
+      displayMessage = audioGatheringMessages[audioGatheringMessageIndex]
+    }
+    // For processing stage with Groq, show "Processing audio" message
+    else if (processingMethod === 'groq' && message.stage === 'processing') {
+      displayMessage = "Processing audio"
+    }
+    // For transcribing stage with Groq, show "Groq transcription commenced"
+    else if (processingMethod === 'groq' && message.stage === 'transcribing') {
+      displayMessage = "Groq transcription commenced"
+    }
+    
     // Update progress state
     setProgress({
       stage: message.status || message.stage || 'processing',
       progress: message.progress || 0,
-      message: message.message || ''
+      message: displayMessage
     })
     
     // Handle completion
@@ -152,7 +203,9 @@ export default function HomePage() {
         
         // Refresh usage display
         getUsage()
-          .then(setGuestUsage)
+          .then(usage => {
+            setGuestUsage(usage)
+          })
           .catch(err => console.error('Failed to refresh usage:', err))
         
         // Keep the connection open a bit longer before cleanup
@@ -172,8 +225,23 @@ export default function HomePage() {
       setError(errorMessage)
       setIsProcessing(false)
       
+      // Handle guest limit exceeded
+      if (message.error_code === 'guest_limit_exceeded') {
+        setError(`You've reached your free limit for ${processingMethod === 'unofficial' ? 'YouTube subtitle' : 'AI'} transcriptions. Sign in to continue!`)
+        // Refresh usage display
+        getUsage()
+          .then(usage => {
+            setGuestUsage(usage)
+          })
+          .catch(e => console.error('Failed to refresh usage:', e))
+        // Redirect after a delay
+        setTimeout(() => {
+          sessionStorage.setItem('auth-redirect-to', '/')
+          router.push('/login')
+        }, 3000)
+      }
       // If unofficial transcript failed, suggest Groq
-      if (processingMethod === 'unofficial' && 
+      else if (processingMethod === 'unofficial' && 
           (message.error_code === 'no_transcript_available' || 
            message.error_code === 'transcript_fetch_failed')) {
         setError(errorMessage + '\n\nWould you like to try Groq AI transcription instead? It downloads the audio and transcribes it with AI.')
@@ -191,7 +259,7 @@ export default function HomePage() {
         message: errorMessage
       })
     }
-  }, [])
+  }, [processingMethod, router, audioGatheringMessages, audioGatheringMessageIndex])
 
   // WebSocket connection
   useWebSocket(socketUrl, handleSocketMessage)
@@ -232,17 +300,10 @@ export default function HomePage() {
   // Handle form submission
   const handleSubmit = async (submittedUrl: string, selectedFormat: 'txt' | 'srt' | 'vtt' | 'json', method: 'unofficial' | 'groq', groqModel?: string) => {
     try {
-      // Check guest limits if not authenticated
-      if (!user && guestUsage?.is_guest) {
-        const usageType = method === 'unofficial' ? 'unofficial' : 'groq'
-        const remaining = guestUsage.usage[usageType].remaining
-        
-        if (remaining <= 0) {
-          setError(`You've reached your free limit for ${method === 'unofficial' ? 'YouTube subtitle' : 'AI'} transcriptions. Sign in to continue!`)
-          sessionStorage.setItem('auth-redirect-to', '/')
-          setTimeout(() => router.push('/login'), 2000)
-          return
-        }
+      // Only prevent submission if guest usage is still loading
+      if (!user && guestUsageLoading) {
+        setError('Loading usage information...')
+        return
       }
       
       setError(null)
@@ -251,21 +312,40 @@ export default function HomePage() {
       setProcessingMethod(method)
       setLastUrl(submittedUrl)
       const methodName = method === 'unofficial' ? 'Unofficial Transcript' : 'Groq AI Transcription'
-      setProgress({
-        stage: 'starting',
-        progress: 10,
-        message: `Initializing ${methodName} job...`
-      })
+      
+      // Set initial progress message based on method
+      if (method === 'groq') {
+        setProgress({
+          stage: 'starting',
+          progress: 10,
+          message: 'Initializing audio gathering...'
+        })
+      } else {
+        setProgress({
+          stage: 'starting',
+          progress: 10,
+          message: `Initializing ${methodName} job...`
+        })
+      }
 
       // Generate client ID and start transcription job
       const newClientId = generateClientId()
       setClientId(newClientId)
       
-      setProgress({
-        stage: 'connecting',
-        progress: 25,
-        message: `Connecting to ${methodName} service...`
-      })
+      // Set connecting message based on method
+      if (method === 'groq') {
+        setProgress({
+          stage: 'connecting',
+          progress: 25,
+          message: 'Preparing to gather audio...'
+        })
+      } else {
+        setProgress({
+          stage: 'connecting',
+          progress: 25,
+          message: `Connecting to ${methodName} service...`
+        })
+      }
 
       const response = await startTranscriptionJob(submittedUrl, newClientId, {
         output_format: selectedFormat,
@@ -276,11 +356,19 @@ export default function HomePage() {
       setJobId(response.job_id)
       
       // Initial progress - WebSocket will take over from here
-      setProgress({
-        stage: 'connecting',
-        progress: 25,
-        message: `Connecting to ${methodName} service...`
-      })
+      if (method === 'groq') {
+        setProgress({
+          stage: 'connecting',
+          progress: 25,
+          message: 'Preparing to gather audio...'
+        })
+      } else {
+        setProgress({
+          stage: 'connecting',
+          progress: 25,
+          message: `Connecting to ${methodName} service...`
+        })
+      }
 
     } catch (err) {
       setIsProcessing(false)
@@ -294,7 +382,23 @@ export default function HomePage() {
       } else if (err instanceof ApiNetworkError) {
         setError(`Network Error: ${err.message}. Please check your connection and try again.`)
       } else if (err instanceof ApiHttpError) {
-        setError(`Server Error: ${err.message} (Status: ${err.status})`)
+        // Check if it's a guest limit error
+        if (err.status === 401 && err.response?.error_code === 'guest_limit_exceeded') {
+          setError(`You've reached your free limit for ${processingMethod === 'unofficial' ? 'YouTube subtitle' : 'AI'} transcriptions. Sign in to continue!`)
+          // Refresh usage display
+          getUsage()
+            .then(usage => {
+              setGuestUsage(usage)
+            })
+            .catch(e => console.error('Failed to refresh usage:', e))
+          // Optionally redirect after a delay
+          setTimeout(() => {
+            sessionStorage.setItem('auth-redirect-to', '/')
+            router.push('/login')
+          }, 3000)
+        } else {
+          setError(`Server Error: ${err.message} (Status: ${err.status})`)
+        }
       } else {
         setError(`Unexpected Error: ${err instanceof Error ? err.message : 'Something went wrong'}`)
       }
@@ -478,7 +582,7 @@ export default function HomePage() {
           {/* URL Input Form */}
           <URLInputForm 
             onSubmit={handleSubmit}
-            disabled={isProcessing}
+            disabled={isProcessing || guestUsageLoading}
             processingMethod={processingMethod}
             onReset={handleReset}
             showReset={jobId !== null || finalTranscript !== ''}

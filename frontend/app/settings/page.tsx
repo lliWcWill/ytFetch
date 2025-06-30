@@ -3,10 +3,14 @@
 import { useAuth } from '@/providers/AuthProvider'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Settings, Bell, Download, Trash2 } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Settings, Bell, Download, Trash2, User, CreditCard, ArrowRight } from 'lucide-react'
+import { useRouter } from 'next/navigation'
+import { getRemainingGuestUsage } from '@/utils/guestLimits'
 
 export default function SettingsPage() {
-  const { user, loading, signOut } = useAuth()
+  const { user, loading, signOut, profile } = useAuth()
+  const router = useRouter()
 
   if (loading) {
     return (

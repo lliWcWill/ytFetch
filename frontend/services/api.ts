@@ -146,11 +146,50 @@ async function createHeaders(includeContentType = true): Promise<Record<string, 
  * Handles fetch responses with proper error handling and type safety
  */
 async function handleResponse<T>(response: Response): Promise<T> {
-  // Handle 401 Unauthorized - redirect to login
+  // Handle 401 Unauthorized - but check if it's a guest limit error first
   if (response.status === 401) {
+    // Try to parse the response to check if it's a guest limit error
+    let errorData: any;
+    try {
+      errorData = await response.json();
+    } catch {
+      errorData = null;
+    }
+    
+    // Debug logging for 401 errors
+    console.log('[API] Received 401 error:', errorData);
+    
+    // Check if it's a guest-related error (don't redirect for these)
+    if (errorData?.error === 'guest_limit_exceeded' || 
+        errorData?.error_code === 'guest_limit_exceeded' ||
+        errorData?.requires_auth === true) {
+      throw new ApiHttpError(
+        errorData.message || 'Guest limit exceeded. Please sign in to continue.',
+        401,
+        'Unauthorized',
+        errorData
+      );
+    }
+    
+    // Check if we have an auth token - if not, this is a guest user
+    const { getAuthToken } = await import('@/lib/auth-token');
+    const token = await getAuthToken();
+    
+    if (!token) {
+      // Guest user - don't redirect, just throw the error
+      console.log('[API] Guest user received 401, not redirecting');
+      throw new ApiHttpError(
+        errorData?.message || 'Guest access limit reached. Please sign in to continue.',
+        401,
+        'Unauthorized',
+        errorData
+      );
+    }
+    
+    // Otherwise, it's a real auth error for an authenticated user - redirect to login
     const { handleAuthError } = await import('@/lib/auth-token');
     handleAuthError();
-    throw new ApiHttpError('Authentication required', 401, 'Unauthorized', null);
+    throw new ApiHttpError('Authentication required', 401, 'Unauthorized', errorData);
   }
 
   // Handle 402 Payment Required - tier limit exceeded

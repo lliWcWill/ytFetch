@@ -22,6 +22,16 @@ class Settings(BaseSettings):
     webshare_username: Optional[str] = Field(None, description="Webshare proxy username")
     webshare_password: Optional[str] = Field(None, description="Webshare proxy password")
     
+    # Supabase Configuration
+    supabase_url: Optional[str] = Field(None, description="Supabase project URL")
+    supabase_anon_key: Optional[str] = Field(None, description="Supabase anonymous key")
+    supabase_service_role_key: Optional[str] = Field(None, description="Supabase service role key")
+    
+    # Stripe Configuration
+    stripe_secret_key: Optional[str] = Field(None, description="Stripe secret API key")
+    stripe_publishable_key: Optional[str] = Field(None, description="Stripe publishable API key")
+    stripe_webhook_secret: Optional[str] = Field(None, description="Stripe webhook secret")
+    
     # Server Configuration
     debug: bool = Field(False, description="Enable debug mode")
     host: str = Field("0.0.0.0", description="Server host")
@@ -48,6 +58,14 @@ class Settings(BaseSettings):
     optimal_channels: int = Field(1, description="Mono audio for transcription")
     chunk_duration_seconds: int = Field(60, description="Audio chunk duration")
     chunk_overlap_seconds: float = Field(0.5, description="Audio chunk overlap")
+    
+    # Stripe Configuration
+    stripe_secret_key: Optional[str] = Field(None, description="Stripe secret API key")
+    stripe_publishable_key: Optional[str] = Field(None, description="Stripe publishable key")
+    stripe_webhook_secret: Optional[str] = Field(None, description="Stripe webhook endpoint secret")
+    stripe_price_free: Optional[str] = Field(None, description="Stripe price ID for free tier")
+    stripe_price_pro: Optional[str] = Field(None, description="Stripe price ID for pro tier")
+    stripe_price_enterprise: Optional[str] = Field(None, description="Stripe price ID for enterprise tier")
 
     class Config:
         env_file = ".env"

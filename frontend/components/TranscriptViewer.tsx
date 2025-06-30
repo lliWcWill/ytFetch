@@ -29,6 +29,7 @@ interface TranscriptViewerProps {
   format: 'txt' | 'srt' | 'vtt' | 'json'
   isVisible: boolean
   onFormatChange: (format: 'txt' | 'srt' | 'vtt' | 'json') => void
+  videoTitle?: string
 }
 
 // Format configuration
@@ -67,7 +68,8 @@ export function TranscriptViewer({
   transcript, 
   format, 
   isVisible, 
-  onFormatChange 
+  onFormatChange,
+  videoTitle 
 }: TranscriptViewerProps) {
   const [isCopied, setIsCopied] = React.useState(false)
   const [wordCount, setWordCount] = React.useState(0)
@@ -153,7 +155,11 @@ export function TranscriptViewer({
       
       const link = document.createElement('a')
       link.href = url
-      link.download = `transcript.${config.extension}`
+      // Use video title for filename if available, otherwise default to 'transcript'
+      const baseFilename = videoTitle 
+        ? videoTitle.replace(/[^a-z0-9]/gi, '_').toLowerCase() 
+        : 'transcript'
+      link.download = `${baseFilename}.${config.extension}`
       document.body.appendChild(link)
       link.click()
       document.body.removeChild(link)
@@ -197,7 +203,7 @@ export function TranscriptViewer({
       "w-full transition-all duration-300 ease-in-out",
       isVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-4"
     )}>
-      <Card className="bg-card border-border">
+      <Card className="w-full max-w-2xl mx-auto transition-all duration-300 bg-gradient-to-b from-card to-card/95 border-border/50 shadow-[0_8px_30px_rgb(0,0,0,0.12)] hover:shadow-[0_8px_40px_rgb(0,0,0,0.15)]">
         <CardHeader className="border-b border-border">
           <div className="flex items-center justify-between">
             <CardTitle className="flex items-center gap-2 text-lg font-semibold">
@@ -335,4 +341,4 @@ export function TranscriptViewer({
   )
 }
 
-export default TranscriptViewer
+export type { TranscriptViewerProps }

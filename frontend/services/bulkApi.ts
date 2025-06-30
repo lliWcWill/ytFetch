@@ -3,7 +3,7 @@
  * Provides type-safe interfaces and functions for interacting with the bulk transcription API
  */
 
-import { getApiUrl, ApiNetworkError, ApiHttpError, ApiValidationError } from './api'
+import { getApiUrl, ApiNetworkError, ApiHttpError, ApiValidationError, TierLimitError } from './api'
 
 // TypeScript Interfaces for Bulk Operations
 
@@ -120,18 +120,65 @@ export interface BulkError {
  */
 async function createHeaders(includeContentType = true): Promise<Record<string, string>> {
   const { createAuthHeaders } = await import('@/lib/auth-token');
-  return await createAuthHeaders(includeContentType);
+  const headers = await createAuthHeaders(includeContentType);
+  
+  // Ensure we have guest session ID for unauthenticated users
+  if (!headers['Authorization']) {
+    const { getGuestSessionId } = await import('@/lib/auth-token');
+    headers['X-Guest-Session-ID'] = getGuestSessionId();
+  }
+  
+  return headers;
 }
 
 /**
  * Handles fetch responses with proper error handling and type safety
  */
 async function handleResponse<T>(response: Response): Promise<T> {
-  // Handle 401 Unauthorized - redirect to login
+  // Handle 401 Unauthorized - but check if it's a guest limit error first
   if (response.status === 401) {
+    // Try to parse the response to check if it's a guest limit error
+    let errorData: any;
+    try {
+      errorData = await response.json();
+    } catch {
+      errorData = null;
+    }
+    
+    // Debug logging for 401 errors
+    console.log('[BulkAPI] Received 401 error:', errorData);
+    
+    // Check if it's a guest-related error (don't redirect for these)
+    if (errorData?.error === 'guest_limit_exceeded' || 
+        errorData?.error_code === 'guest_limit_exceeded' ||
+        errorData?.requires_auth === true) {
+      throw new ApiHttpError(
+        errorData.message || 'Guest limit exceeded. Please sign in to continue.',
+        401,
+        'Unauthorized',
+        errorData
+      );
+    }
+    
+    // Check if we have an auth token - if not, this is a guest user
+    const { getAuthToken } = await import('@/lib/auth-token');
+    const token = await getAuthToken();
+    
+    if (!token) {
+      // Guest user - don't redirect, just throw the error
+      console.log('[BulkAPI] Guest user received 401, not redirecting');
+      throw new ApiHttpError(
+        errorData?.message || 'Guest access limit reached. Please sign in to continue.',
+        401,
+        'Unauthorized',
+        errorData
+      );
+    }
+    
+    // Otherwise, it's a real auth error for an authenticated user - redirect to login
     const { handleAuthError } = await import('@/lib/auth-token');
     handleAuthError();
-    throw new ApiHttpError('Authentication required', 401, 'Unauthorized', null);
+    throw new ApiHttpError('Authentication required', 401, 'Unauthorized', errorData);
   }
 
   // Check if response is ok
@@ -171,6 +218,12 @@ async function bulkApiRequest<T>(
   
   try {
     const defaultHeaders = await createHeaders();
+    
+    // Debug logging for guest sessions
+    if (!defaultHeaders['Authorization'] && defaultHeaders['X-Guest-Session-ID']) {
+      console.log('[BulkAPI] Making request as guest with session ID:', defaultHeaders['X-Guest-Session-ID']);
+    }
+    
     const response = await fetch(url, {
       ...options,
       headers: {
@@ -281,7 +334,7 @@ export async function createBulkJob(
     const response = await bulkApiRequest<BulkJobResponse>('/api/v1/bulk/create', {
       method: 'POST',
       body: JSON.stringify(request),
-    }, true) // Requires auth
+    })
 
     return response
   } catch (error) {
@@ -312,7 +365,7 @@ export async function getBulkJobStatus(jobId: string): Promise<BulkJobResponse> 
     throw new ApiValidationError('Job ID is required and must be a string')
   }
 
-  return await bulkApiRequest<BulkJobResponse>(`/api/v1/bulk/jobs/${jobId}`, {}, true)
+  return await bulkApiRequest<BulkJobResponse>(`/api/v1/bulk/jobs/${jobId}`)
 }
 
 /**
@@ -334,9 +387,7 @@ export async function listBulkJobs(
   })
 
   return await bulkApiRequest<BulkJobListResponse>(
-    `/api/v1/bulk/jobs?${params.toString()}`,
-    {},
-    true
+    `/api/v1/bulk/jobs?${params.toString()}`
   )
 }
 
@@ -357,7 +408,7 @@ export async function startBulkJob(jobId: string): Promise<{
 
   return await bulkApiRequest(`/api/v1/bulk/jobs/${jobId}/start`, {
     method: 'POST',
-  }, true)
+  })
 }
 
 /**
@@ -377,7 +428,7 @@ export async function cancelBulkJob(jobId: string): Promise<{
 
   return await bulkApiRequest(`/api/v1/bulk/jobs/${jobId}/cancel`, {
     method: 'POST',
-  }, true)
+  })
 }
 
 /**
@@ -393,8 +444,9 @@ export async function downloadBulkJobResults(jobId: string): Promise<Blob> {
   const url = `${getApiUrl()}/api/v1/bulk/jobs/${jobId}/download`
   
   try {
+    const headers = await createHeaders(false);
     const response = await fetch(url, {
-      headers: createBulkHeaders(true),
+      headers,
     })
     
     if (!response.ok) {

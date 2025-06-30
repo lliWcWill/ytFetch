@@ -762,7 +762,7 @@ class TranscriptionService:
         language: str = "en",
         speed_multiplier: float = 1.0,
         progress_callback: Optional[Callable[[str, float, str], None]] = None
-    ) -> Optional[str]:
+    ) -> Optional[Dict]:
         """
         Enhanced transcription with advanced rate limiting and error handling.
         
@@ -776,7 +776,12 @@ class TranscriptionService:
                              Progress is 0.0-1.0, messages describe current operation
             
         Returns:
-            Optional[str]: Transcribed text or None if failed
+            Optional[Dict]: Dictionary containing:
+                - segments: List of transcript segments with text and timestamps
+                - audio_duration: Duration in seconds
+                - chunks_processed: Number of chunks processed
+                - download_strategy: The strategy used (if applicable)
+            Returns None if failed
             
         Progress Callback Usage:
             The progress callback receives three parameters:
@@ -875,7 +880,17 @@ class TranscriptionService:
                 logger.info(f"🚀 Speed: {speed_factor:.1f}x realtime")
                 logger.info("=" * 60)
                 
-                return transcription
+                # Return structured result
+                return {
+                    "segments": [{
+                        "text": transcription,
+                        "start": 0,
+                        "duration": duration_seconds
+                    }],
+                    "audio_duration": duration_seconds,
+                    "chunks_processed": 1,
+                    "download_strategy": None
+                }
             
             # Split audio into chunks
             if progress_callback:
@@ -960,12 +975,18 @@ class TranscriptionService:
                     if transcription:
                         transcriptions[chunk_index] = transcription
             
-            # Combine transcriptions in order
-            full_transcription = " ".join(
-                transcriptions.get(i, "") for i in range(1, len(chunks) + 1)
-            ).strip()
+            # Create segments from chunk transcriptions
+            segments = []
+            for i in range(1, len(chunks) + 1):
+                if i in transcriptions:
+                    chunk = chunks[i - 1]  # chunks list is 0-indexed
+                    segments.append({
+                        "text": transcriptions[i],
+                        "start": chunk["start_ms"] / 1000.0,  # Convert to seconds
+                        "duration": chunk["duration_ms"] / 1000.0  # Convert to seconds
+                    })
             
-            if not full_transcription:
+            if not segments:
                 raise TranscriptionError("No successful transcriptions")
             
             if progress_callback:
@@ -991,7 +1012,13 @@ class TranscriptionService:
             logger.info(f"🌐 Provider: {self.provider}")
             logger.info("=" * 60)
             
-            return full_transcription
+            # Return structured result
+            return {
+                "segments": segments,
+                "audio_duration": duration_seconds,
+                "chunks_processed": len(chunks),
+                "download_strategy": None
+            }
             
         except Exception as e:
             logger.error(f"Enhanced transcription failed: {e}")
@@ -1088,6 +1115,11 @@ async def transcribe_audio_from_file(
         # Log final metrics
         metrics = service.get_session_metrics()
         logger.info(f"Session metrics: {metrics}")
+        
+        # For backward compatibility, if result is a dict, extract the text
+        if isinstance(result, dict) and result.get('segments'):
+            # Join all segment texts to create the full transcription
+            return " ".join(segment.get('text', '') for segment in result['segments'])
         
         return result
         

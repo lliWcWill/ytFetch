@@ -12,6 +12,8 @@ import zipfile
 from datetime import datetime
 from typing import Dict, Any, Optional
 
+import aiohttp
+
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.requests import Request
@@ -55,6 +57,16 @@ from ..api.schemas import (
     ERROR_EXAMPLES
 )
 from ..core.config import settings
+from ..core.auth import (
+    get_current_user,
+    get_current_user_optional,
+    AuthenticatedUser,
+    verify_resource_ownership,
+    check_user_tier_limits,
+    check_tier_limits,
+    RequireAuth,
+    OptionalAuth
+)
 from ..services.bulk_job_service import (
     bulk_job_service,
     BulkJobError,
@@ -64,6 +76,7 @@ from ..services.bulk_job_service import (
     TaskStatus
 )
 from ..services.youtube_service import YouTubeService
+from ..services.usage_service import usage_service, UsageCounter
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -79,58 +92,15 @@ router = APIRouter(prefix="/api/v1/bulk", tags=["bulk"])
 youtube_service = YouTubeService()
 
 
-# Authentication dependency (placeholder - replace with actual auth system)
-async def get_current_user(request: Request) -> UserInfo:
-    """
-    Authentication dependency for bulk operations.
-    
-    TODO: Replace with actual authentication system.
-    For now, returns a mock user for development.
-    """
-    # Check for Authorization header
-    auth_header = request.headers.get("Authorization")
-    if not auth_header:
-        # For development, allow anonymous access with free tier
-        return UserInfo(
-            user_id="anonymous",
-            email=None,
-            tier="free",
-            created_at=datetime.now().isoformat()
-        )
-    
-    # TODO: Implement actual JWT/session validation
-    # For now, parse a simple "Bearer user_id:tier" format for testing
-    try:
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            parts = token.split(":")
-            if len(parts) >= 2:
-                user_id, tier = parts[0], parts[1]
-                return UserInfo(
-                    user_id=user_id,
-                    email=f"{user_id}@example.com",
-                    tier=tier,
-                    created_at=datetime.now().isoformat()
-                )
-    except Exception:
-        pass
-    
-    # Default to anonymous free user
+# Legacy user info conversion for backward compatibility
+def auth_user_to_user_info(user: AuthenticatedUser) -> UserInfo:
+    """Convert AuthenticatedUser to UserInfo for backward compatibility."""
     return UserInfo(
-        user_id="anonymous", 
-        email=None,
-        tier="free",
-        created_at=datetime.now().isoformat()
+        user_id=user.id,
+        email=user.email,
+        tier="free",  # TODO: Get actual tier from user profile
+        created_at=user.created_at
     )
-
-
-# Optional authentication dependency (allows anonymous access)
-async def get_user_optional(request: Request) -> Optional[UserInfo]:
-    """Optional authentication - returns None if not authenticated."""
-    try:
-        return await get_current_user(request)
-    except Exception:
-        return None
 
 
 @router.post(
@@ -144,7 +114,7 @@ async def get_user_optional(request: Request) -> Optional[UserInfo]:
 async def analyze_bulk_source(
     request: Request,
     analyze_request: BulkAnalyzeRequest,
-    user: Optional[UserInfo] = Depends(get_user_optional)
+    user: Optional[AuthenticatedUser] = OptionalAuth
 ) -> BulkAnalyzeResponse:
     """
     Analyze a YouTube playlist or channel for bulk processing.
@@ -169,7 +139,20 @@ async def analyze_bulk_source(
             )
         
         # Determine user tier and limits
-        user_tier = UserTier(user.tier if user else "free")
+        if user:
+            logger.info(f"Analyzing bulk source for authenticated user: {user.id}")
+            # Get user profile to determine tier
+            try:
+                # For now, default to free tier until we implement tier lookup
+                # TODO: Implement proper tier lookup from user profile
+                user_tier = UserTier.FREE
+            except Exception as e:
+                logger.warning(f"Failed to get user profile, defaulting to free tier: {e}")
+                user_tier = UserTier("free")
+        else:
+            logger.info("Analyzing bulk source for anonymous user")
+            user_tier = UserTier("free")
+        
         tier_config = bulk_job_service.tier_limits[user_tier]
         
         # Extract videos with progress tracking
@@ -205,7 +188,18 @@ async def analyze_bulk_source(
         else:
             source_type = "channel"
             # Extract channel name from first video or URL
-            title = videos[0].get("uploader", "Unknown Channel") if videos else "Unknown Channel"
+            if videos:
+                # Try different fields for channel name
+                title = (videos[0].get("uploader") or 
+                        videos[0].get("channel") or 
+                        videos[0].get("uploader_id") or
+                        "Unknown Channel")
+            else:
+                title = "Unknown Channel"
+        
+        # Ensure title is never None
+        if not title:
+            title = "Unknown Source"
         
         # Check if user can process all videos
         total_videos_found = len(videos)
@@ -259,7 +253,7 @@ async def analyze_bulk_source(
 async def create_bulk_job(
     request: Request,
     create_request: BulkCreateRequest,
-    user: UserInfo = Depends(get_current_user)
+    user: Optional[AuthenticatedUser] = OptionalAuth
 ) -> BulkJobResponse:
     """
     Create a new bulk transcription job.
@@ -269,7 +263,89 @@ async def create_bulk_job(
     to begin processing the job.
     """
     try:
-        logger.info(f"Creating bulk job for user {user.user_id}: {create_request.url}")
+        # Handle guest users
+        if not user:
+            # Get session ID from request - check multiple sources
+            session_id = (
+                request.headers.get('X-Guest-Session-ID') or
+                request.headers.get('x-guest-session-id') or 
+                request.headers.get('x-session-id') or 
+                request.cookies.get('session_id')
+            )
+            if not session_id:
+                from ..services.guest_service import guest_service
+                session_id = guest_service.generate_session_id()
+            
+            # Check guest limits for bulk jobs
+            # Guests get 1 bulk job per day as a demo
+            from ..services.guest_service import guest_service
+            
+            # First check if guest has already created a bulk job today
+            from ..core.supabase import SupabaseClient
+            supabase = SupabaseClient.get_service_client()
+            
+            # For guests, we need to store the session ID in metadata to track their jobs
+            # since we can't use a user_id that doesn't exist in the users table
+            guest_user_id = None
+            
+            # Check if this session already has a bulk job today
+            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            # Query by session_id in metadata for guest jobs
+            existing_jobs = supabase.table('bulk_jobs').select('id, metadata').is_('user_id', 'null').gte('created_at', today_start.isoformat()).execute()
+            
+            # Filter by session_id in metadata
+            guest_jobs_today = [
+                job for job in existing_jobs.data 
+                if job.get('metadata', {}).get('session_id') == session_id
+            ]
+            
+            if guest_jobs_today and len(guest_jobs_today) > 0:
+                raise HTTPException(
+                    status_code=401,
+                    detail=HTTPError(
+                        error="guest_limit_exceeded",
+                        message="Guests are limited to 1 bulk job per day. Please sign in for unlimited access.",
+                        details={
+                            "current_usage": 1,
+                            "limit": 1,
+                            "requires_auth": True
+                        },
+                        status_code=401
+                    ).dict()
+                )
+            
+            # For guests, limit to max 60 videos per job
+            max_videos_for_guest = min(create_request.max_videos or 60, 60)
+            if create_request.max_videos and create_request.max_videos > 60:
+                logger.info(f"Guest requested {create_request.max_videos} videos, limiting to 60")
+            
+            # Note: We've already checked the daily job limit above.
+            # The guest_service.check_guest_limit for "bulk_videos" tracks total video count,
+            # but for bulk jobs we want to limit by job count per day, not total videos.
+            # So we skip the video count check and just enforce the max videos per job.
+            
+            # Use the guest_user_id we already generated above
+            user_id = guest_user_id
+            user_tier = UserTier("free")  # Guests get free tier limits
+            logger.info(f"Creating bulk job for guest session {session_id} (user_id: {user_id}): {create_request.url}")
+        else:
+            # Authenticated user
+            user_id = user.id
+            logger.info(f"Creating bulk job for user {user.id}: {create_request.url}")
+            
+            # In token-based system, authenticated users have no tier limits
+            # They are only limited by their token balance
+            logger.info(f"Authenticated user {user.id} creating bulk job - no tier limits in token-based system")
+            
+            # Get actual user tier from profile
+            try:
+                from ..core.auth import get_current_user_with_profile
+                user_profile = await get_current_user_with_profile(user)
+                tier_name = user_profile.get("tier_name", "free")
+                user_tier = UserTier(tier_name)
+            except Exception as e:
+                logger.warning(f"Failed to get user profile, defaulting to free tier: {e}")
+                user_tier = UserTier.FREE
         
         # Validate transcript method
         try:
@@ -285,23 +361,29 @@ async def create_bulk_job(
                 ).dict()
             )
         
-        # Validate user tier
-        try:
-            user_tier = UserTier(user.tier)
-        except ValueError:
-            # Default to free tier for unknown tiers
-            user_tier = UserTier.FREE
-            logger.warning(f"Unknown user tier '{user.tier}', defaulting to free")
+        logger.info(f"Using user tier: {user_tier.value} for user {user_id}")
         
         # Create job using bulk job service
+        # For guests, use the limited max_videos value (defined earlier in guest block)
+        if not user:
+            final_max_videos = max_videos_for_guest
+        else:
+            final_max_videos = create_request.max_videos
+        
+        # For guests, pass session_id in metadata
+        metadata = None
+        if not user and session_id:
+            metadata = {"session_id": session_id}
+        
         job_result = await bulk_job_service.create_bulk_job(
-            user_id=user.user_id,
+            user_id=user_id,
             source_url=create_request.url,
             transcript_method=transcript_method,
             output_format=create_request.output_format,
-            max_videos=create_request.max_videos,
+            max_videos=final_max_videos,
             user_tier=user_tier,
-            webhook_url=create_request.webhook_url
+            webhook_url=create_request.webhook_url,
+            metadata=metadata
         )
         
         # Get job status to return complete information
@@ -321,7 +403,7 @@ async def create_bulk_job(
         # Convert to response format
         response = BulkJobResponse(
             job_id=job_status["job_id"],
-            user_id=user.user_id,
+            user_id=user_id,
             source_url=create_request.url,
             transcript_method=create_request.transcript_method,
             output_format=create_request.output_format,
@@ -333,7 +415,7 @@ async def create_bulk_job(
             processing_videos=job_status.get("processing_videos"),
             retry_videos=job_status.get("retry_videos"),
             progress_percent=job_status["progress_percent"],
-            user_tier=user.tier,
+            user_tier=user_tier.value,
             webhook_url=create_request.webhook_url,
             zip_file_path=job_status.get("zip_file_path"),
             zip_available=bool(job_status.get("zip_file_path")),
@@ -343,6 +425,38 @@ async def create_bulk_job(
             completed_at=job_status.get("completed_at"),
             tier_limits=job_result.get("tier_limits")
         )
+        
+        # Increment usage counters after successful job creation
+        if user:
+            # Authenticated user - use usage service
+            try:
+                await usage_service.increment_usage(
+                    user_id=user.id,
+                    counter_type=UsageCounter.JOBS_CREATED,
+                    increment=1
+                )
+                # Also increment videos processed counter
+                await usage_service.increment_usage(
+                    user_id=user.id,
+                    counter_type=UsageCounter.VIDEOS_PROCESSED,
+                    increment=job_status['total_videos']
+                )
+                logger.info(f"Updated usage counters for user {user.id}")
+            except Exception as usage_error:
+                # Log error but don't fail the request - job is already created
+                logger.error(f"Failed to update usage counters: {usage_error}")
+        else:
+            # Guest user - increment guest usage
+            try:
+                from ..services.guest_service import guest_service
+                await guest_service.increment_guest_usage(
+                    session_id=session_id,
+                    usage_type="bulk_videos",
+                    increment=job_status['total_videos']
+                )
+                logger.info(f"Updated guest usage for session {session_id}")
+            except Exception as guest_error:
+                logger.error(f"Failed to update guest usage: {guest_error}")
         
         logger.info(f"Created bulk job {job_result['job_id']} with {job_status['total_videos']} videos")
         return response
@@ -354,7 +468,7 @@ async def create_bulk_job(
             detail=HTTPError(
                 error="job_creation_failed",
                 message=str(e),
-                details={"user_id": user.user_id},
+                details={"user_id": user_id},
                 status_code=400
             ).dict()
         )
@@ -381,8 +495,9 @@ async def create_bulk_job(
     description="Get the current status and progress of a specific bulk job, including detailed metrics and task information."
 )
 async def get_job_status(
+    request: Request,
     job_id: str,
-    user: UserInfo = Depends(get_current_user)
+    user: Optional[AuthenticatedUser] = OptionalAuth
 ) -> BulkJobResponse:
     """
     Get detailed status and progress information for a bulk job.
@@ -404,21 +519,35 @@ async def get_job_status(
                 ).dict()
             )
         
-        # Verify job ownership (if not anonymous)
-        if user.user_id != "anonymous" and job_status.get("user_id") != user.user_id:
-            raise HTTPException(
-                status_code=403,
-                detail=HTTPError(
-                    error="access_denied",
-                    message="Access denied to this bulk job",
-                    details={"job_id": job_id},
-                    status_code=403
-                ).dict()
+        # Verify job ownership
+        if user:
+            # Authenticated user - check user_id
+            verify_resource_ownership(user.id, job_status.get("user_id"), "bulk job")
+        else:
+            # Guest user - check session_id in metadata
+            session_id = (
+                request.headers.get('X-Guest-Session-ID') or
+                request.headers.get('x-guest-session-id') or 
+                request.headers.get('x-session-id') or 
+                request.cookies.get('session_id')
             )
+            job_metadata = job_status.get("metadata", {})
+            job_session_id = job_metadata.get("session_id") if job_metadata else None
+            
+            if not session_id or session_id != job_session_id:
+                raise HTTPException(
+                    status_code=401,
+                    detail=HTTPError(
+                        error="unauthorized",
+                        message="You don't have access to this bulk job",
+                        details={"requires_auth": True},
+                        status_code=401
+                    ).dict()
+                )
         
         response = BulkJobResponse(
             job_id=job_status["job_id"],
-            user_id=job_status.get("user_id", user.user_id),
+            user_id=job_status.get("user_id", user.id if user else None),
             source_url=job_status.get("source_url", ""),
             transcript_method=job_status["transcript_method"],
             output_format=job_status["output_format"],
@@ -430,7 +559,7 @@ async def get_job_status(
             processing_videos=job_status.get("processing_videos"),
             retry_videos=job_status.get("retry_videos"),
             progress_percent=job_status["progress_percent"],
-            user_tier=job_status.get("user_tier", user.tier),
+            user_tier=job_status.get("user_tier", "free"),
             webhook_url=job_status.get("webhook_url"),
             zip_file_path=job_status.get("zip_file_path"),
             zip_available=bool(job_status.get("zip_file_path")),
@@ -466,7 +595,7 @@ async def get_job_status(
     description="Get a paginated list of bulk jobs for the authenticated user, with optional filtering and sorting."
 )
 async def list_user_jobs(
-    user: UserInfo = Depends(get_current_user),
+    user: AuthenticatedUser = RequireAuth,
     page: int = 1,
     per_page: int = 20,
     status: Optional[str] = None
@@ -488,7 +617,7 @@ async def list_user_jobs(
         
         # Get user jobs
         jobs = await bulk_job_service.list_user_jobs(
-            user_id=user.user_id,
+            user_id=user.id,
             limit=per_page,
             offset=offset
         )
@@ -502,7 +631,7 @@ async def list_user_jobs(
         for job in jobs:
             job_response = BulkJobResponse(
                 job_id=job["job_id"],
-                user_id=user.user_id,
+                user_id=user.id,
                 source_url=job["source_url"],
                 transcript_method=job["transcript_method"],
                 output_format=job["output_format"],
@@ -514,7 +643,7 @@ async def list_user_jobs(
                 processing_videos=None,
                 retry_videos=None,
                 progress_percent=round((job["completed_videos"] / job["total_videos"] * 100) if job["total_videos"] > 0 else 0, 2),
-                user_tier=user.tier,
+                user_tier="free",  # TODO: Get from user profile
                 webhook_url=None,  # Not included in list view
                 zip_file_path=None,
                 zip_available=job["zip_available"],
@@ -539,13 +668,13 @@ async def list_user_jobs(
         )
         
     except Exception as e:
-        logger.error(f"Failed to list jobs for user {user.user_id}: {e}")
+        logger.error(f"Failed to list jobs for user {user.id}: {e}")
         raise HTTPException(
             status_code=500,
             detail=HTTPError(
                 error="job_list_failed",
                 message="Failed to list bulk jobs",
-                details={"user_id": user.user_id, "error": str(e)},
+                details={"user_id": user.id, "error": str(e)},
                 status_code=500
             ).dict()
         )
@@ -561,7 +690,7 @@ async def list_user_jobs(
 async def start_job_processing(
     request: Request,
     job_id: str,
-    user: UserInfo = Depends(get_current_user)
+    user: Optional[AuthenticatedUser] = OptionalAuth
 ) -> JSONResponse:
     """
     Start processing a bulk job.
@@ -584,17 +713,31 @@ async def start_job_processing(
                 ).dict()
             )
         
-        # Verify job ownership (if not anonymous)
-        if user.user_id != "anonymous" and job_status.get("user_id") != user.user_id:
-            raise HTTPException(
-                status_code=403,
-                detail=HTTPError(
-                    error="access_denied",
-                    message="Access denied to this bulk job",
-                    details={"job_id": job_id},
-                    status_code=403
-                ).dict()
+        # Verify job ownership
+        if user:
+            # Authenticated user - check user_id
+            verify_resource_ownership(user.id, job_status.get("user_id"), "bulk job")
+        else:
+            # Guest user - check session_id in metadata
+            session_id = (
+                request.headers.get('X-Guest-Session-ID') or
+                request.headers.get('x-guest-session-id') or 
+                request.headers.get('x-session-id') or 
+                request.cookies.get('session_id')
             )
+            job_metadata = job_status.get("metadata", {})
+            job_session_id = job_metadata.get("session_id") if job_metadata else None
+            
+            if not session_id or session_id != job_session_id:
+                raise HTTPException(
+                    status_code=401,
+                    detail=HTTPError(
+                        error="guest_access_limit_reached",
+                        message="Guest access limit reached. Please sign in to continue.",
+                        details={"requires_auth": True},
+                        status_code=401
+                    ).dict()
+                )
         
         # Check if job can be started
         if job_status["status"] != JobStatus.PENDING.value:
@@ -622,7 +765,7 @@ async def start_job_processing(
                 ).dict()
             )
         
-        logger.info(f"Started processing job {job_id} for user {user.user_id}")
+        logger.info(f"Started processing job {job_id} for user {user.id if user else 'guest'}")
         
         return JSONResponse(
             status_code=202,
@@ -670,7 +813,7 @@ async def start_job_processing(
 async def cancel_job(
     request: Request,
     job_id: str,
-    user: UserInfo = Depends(get_current_user)
+    user: Optional[AuthenticatedUser] = OptionalAuth
 ) -> JSONResponse:
     """
     Cancel a bulk job.
@@ -693,17 +836,31 @@ async def cancel_job(
                 ).dict()
             )
         
-        # Verify job ownership (if not anonymous)
-        if user.user_id != "anonymous" and job_status.get("user_id") != user.user_id:
-            raise HTTPException(
-                status_code=403,
-                detail=HTTPError(
-                    error="access_denied",
-                    message="Access denied to this bulk job",
-                    details={"job_id": job_id},
-                    status_code=403
-                ).dict()
+        # Verify job ownership
+        if user:
+            # Authenticated user - check user_id
+            verify_resource_ownership(user.id, job_status.get("user_id"), "bulk job")
+        else:
+            # Guest user - check session_id in metadata
+            session_id = (
+                request.headers.get('X-Guest-Session-ID') or
+                request.headers.get('x-guest-session-id') or 
+                request.headers.get('x-session-id') or 
+                request.cookies.get('session_id')
             )
+            job_metadata = job_status.get("metadata", {})
+            job_session_id = job_metadata.get("session_id") if job_metadata else None
+            
+            if not session_id or session_id != job_session_id:
+                raise HTTPException(
+                    status_code=401,
+                    detail=HTTPError(
+                        error="unauthorized",
+                        message="You don't have access to this bulk job",
+                        details={"requires_auth": True},
+                        status_code=401
+                    ).dict()
+                )
         
         # Cancel the job
         success = await bulk_job_service.cancel_job(job_id)
@@ -719,7 +876,7 @@ async def cancel_job(
                 ).dict()
             )
         
-        logger.info(f"Cancelled job {job_id} for user {user.user_id}")
+        logger.info(f"Cancelled job {job_id} for user {user.id if user else 'guest'}")
         
         return JSONResponse(
             content={
@@ -754,15 +911,15 @@ async def cancel_job(
     summary="Download job results",
     description="Download a ZIP file containing all completed transcripts from a bulk job."
 )
-async def download_job_results(
+async def download_job_transcripts(
     job_id: str,
-    user: UserInfo = Depends(get_current_user)
+    user: AuthenticatedUser = RequireAuth
 ) -> StreamingResponse:
     """
     Download ZIP file containing all completed transcripts.
     
     Returns a ZIP file with all successfully transcribed videos
-    from the bulk job.
+    from the bulk job. Creates the ZIP entirely in memory.
     """
     try:
         # Verify job exists and ownership
@@ -779,67 +936,144 @@ async def download_job_results(
                 ).dict()
             )
         
-        # Verify job ownership (if not anonymous)
-        if user.user_id != "anonymous" and job_status.get("user_id") != user.user_id:
+        # Verify job ownership using the auth utility function
+        verify_resource_ownership(user.id, job_status.get("user_id"), "bulk job")
+        
+        # Get completed tasks with transcript data
+        completed_tasks = await bulk_job_service.get_completed_tasks(job_id)
+        
+        if not completed_tasks:
             raise HTTPException(
-                status_code=403,
+                status_code=404,
                 detail=HTTPError(
-                    error="access_denied",
-                    message="Access denied to this bulk job",
-                    details={"job_id": job_id},
-                    status_code=403
+                    error="no_results",
+                    message="No completed transcripts available for download",
+                    details={"job_id": job_id, "completed_count": 0},
+                    status_code=404
                 ).dict()
             )
         
-        # Check if ZIP file is available
-        zip_path = job_status.get("zip_file_path")
-        if not zip_path or not os.path.exists(zip_path):
-            # Generate ZIP file if job is completed but ZIP doesn't exist
-            if job_status["status"] == JobStatus.COMPLETED.value:
-                logger.info(f"Generating ZIP file for completed job {job_id}")
-                zip_path = await bulk_job_service._generate_job_zip(job_id)
-                
-                if not zip_path:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=HTTPError(
-                            error="no_results",
-                            message="No completed transcripts available for download",
-                            details={"job_id": job_id},
-                            status_code=404
-                        ).dict()
-                    )
-            else:
+        # Create in-memory ZIP file
+        zip_buffer = io.BytesIO()
+        
+        try:
+            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zipf:
+                for task in completed_tasks:
+                    try:
+                        # Create safe filename from video title and ID (using schema field names)
+                        video_title = task.get("title", "Unknown")
+                        video_id = task.get("video_id", "unknown")
+                        
+                        # Sanitize title for filename
+                        safe_title = youtube_service.sanitize_filename(video_title)
+                        
+                        # Get output format from job
+                        output_format = job_status.get("output_format", "txt")
+                        
+                        # Create filename
+                        filename = f"{safe_title}_{video_id}.{output_format}"
+                        
+                        # Get transcript text - either from metadata field or from storage URL
+                        metadata = task.get("metadata", {})
+                        transcript_text = metadata.get("transcript_text") if metadata else None
+                        transcript_url = task.get("transcript_storage_url")
+                        
+                        # If no direct transcript text, try to download from Supabase Storage
+                        if not transcript_text and transcript_url:
+                            try:
+                                from ..core.supabase import get_supabase_service
+                                
+                                # Check if it's a Supabase Storage URL
+                                if "supabase" in transcript_url and "/storage/" in transcript_url:
+                                    # Download file from Supabase Storage
+                                    supabase = get_supabase_service()
+                                    
+                                    # Extract bucket and file path from URL
+                                    # URL format: https://project.supabase.co/storage/v1/object/public/bucket-name/file-path
+                                    url_parts = transcript_url.split("/storage/v1/object/")
+                                    if len(url_parts) > 1:
+                                        bucket_path = url_parts[1]
+                                        if bucket_path.startswith("public/"):
+                                            bucket_path = bucket_path[7:]  # Remove "public/"
+                                        
+                                        path_parts = bucket_path.split("/", 1)
+                                        if len(path_parts) == 2:
+                                            bucket_name, file_path = path_parts
+                                            
+                                            # Download file from Supabase Storage
+                                            try:
+                                                response = supabase.storage.from_(bucket_name).download(file_path)
+                                                if response:
+                                                    transcript_text = response.decode('utf-8')
+                                                    logger.debug(f"Downloaded transcript from Supabase Storage: {file_path}")
+                                            except Exception as storage_e:
+                                                logger.warning(f"Failed to download from Supabase Storage: {storage_e}")
+                                
+                                # If Supabase Storage failed, try direct HTTP download
+                                if not transcript_text:
+                                    async with aiohttp.ClientSession() as session:
+                                        async with session.get(transcript_url) as response:
+                                            if response.status == 200:
+                                                transcript_text = await response.text()
+                                                logger.debug(f"Downloaded transcript via HTTP: {transcript_url}")
+                                            else:
+                                                logger.warning(f"HTTP download failed with status {response.status}: {transcript_url}")
+                                
+                            except Exception as download_e:
+                                logger.warning(f"Failed to download transcript from URL {transcript_url}: {download_e}")
+                        
+                        # Skip if still no transcript text
+                        if not transcript_text:
+                            logger.warning(f"Skipping task {task.get('id')} - no transcript text available")
+                            continue
+                        
+                        # Add transcript to ZIP
+                        zipf.writestr(filename, transcript_text)
+                        logger.debug(f"Added {filename} to ZIP ({len(transcript_text)} characters)")
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to add task {task.get('id', 'unknown')} to ZIP: {e}")
+                        continue
+            
+            # Get ZIP data
+            zip_buffer.seek(0)
+            zip_data = zip_buffer.getvalue()
+            zip_size = len(zip_data)
+            
+            if zip_size == 0:
                 raise HTTPException(
-                    status_code=400,
+                    status_code=404,
                     detail=HTTPError(
-                        error="download_not_ready",
-                        message="Download not available - job not completed or no successful transcripts",
-                        details={"job_id": job_id, "status": job_status["status"]},
-                        status_code=400
+                        error="no_valid_transcripts",
+                        message="No valid transcripts could be added to ZIP file",
+                        details={"job_id": job_id, "completed_tasks": len(completed_tasks)},
+                        status_code=404
                     ).dict()
                 )
+            
+            # Create filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"transcripts_{job_id[:8]}_{timestamp}.zip"
+            
+            # Create streaming response from in-memory data
+            def iter_zip_data():
+                chunk_size = 8192
+                for i in range(0, len(zip_data), chunk_size):
+                    yield zip_data[i:i + chunk_size]
+            
+            logger.info(f"Serving in-memory ZIP download for job {job_id} to user {user.id} ({zip_size} bytes, {len(completed_tasks)} tasks)")
+            
+            return StreamingResponse(
+                iter_zip_data(),
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": f"attachment; filename={filename}",
+                    "Content-Length": str(zip_size)
+                }
+            )
         
-        # Create filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"bulk_transcripts_{job_id[:8]}_{timestamp}.zip"
-        
-        # Create streaming response
-        def iter_file():
-            with open(zip_path, "rb") as file:
-                while chunk := file.read(8192):
-                    yield chunk
-        
-        logger.info(f"Serving ZIP download for job {job_id} to user {user.user_id}")
-        
-        return StreamingResponse(
-            iter_file(),
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": f"attachment; filename={filename}",
-                "Content-Length": str(os.path.getsize(zip_path))
-            }
-        )
+        finally:
+            zip_buffer.close()
         
     except HTTPException:
         raise
@@ -864,7 +1098,7 @@ async def download_job_results(
 )
 async def delete_job(
     job_id: str,
-    user: UserInfo = Depends(get_current_user)
+    user: AuthenticatedUser = RequireAuth
 ) -> JSONResponse:
     """
     Delete a bulk job and all associated data.
@@ -887,17 +1121,8 @@ async def delete_job(
                 ).dict()
             )
         
-        # Verify job ownership (if not anonymous)
-        if user.user_id != "anonymous" and job_status.get("user_id") != user.user_id:
-            raise HTTPException(
-                status_code=403,
-                detail=HTTPError(
-                    error="access_denied",
-                    message="Access denied to this bulk job",
-                    details={"job_id": job_id},
-                    status_code=403
-                ).dict()
-            )
+        # Verify job ownership using the auth utility function
+        verify_resource_ownership(user.id, job_status.get("user_id"), "bulk job")
         
         # Cancel job if it's running
         if job_status["status"] in [JobStatus.PENDING.value, JobStatus.PROCESSING.value]:
@@ -914,7 +1139,7 @@ async def delete_job(
         
         # TODO: Implement actual job deletion in bulk_job_service
         # For now, we'll just cancel it
-        logger.info(f"Deleted job {job_id} for user {user.user_id}")
+        logger.info(f"Deleted job {job_id} for user {user.id}")
         
         return JSONResponse(
             content={

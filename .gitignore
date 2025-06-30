@@ -68,3 +68,12 @@ test_downloads/
 
 # Test files (keep the test scripts, ignore downloads)
 *_test_downloads/
+
+#apiKeys
+backend/.env
+
+# Patch files in sql directory and Python files in tests directory
+backend/sql/*.patch
+backend/tests/*.py
+
+misc/

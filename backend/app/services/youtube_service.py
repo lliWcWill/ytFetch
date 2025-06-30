@@ -2,14 +2,26 @@
 YouTube Service Module
 
 This module provides a clean YouTubeService class that encapsulates all YouTube operations
-including video information retrieval, transcript fetching, and audio downloading.
+including video information retrieval, transcript fetching, audio downloading, 
+playlist/channel extraction, and metadata retrieval.
 
-Migrated from appStreamlit.py with:
-- Removed Streamlit dependencies
-- Added async support where appropriate
+Features:
+- 4-method robust transcript fetching with fallbacks:
+  * Method 1: New API (v1.1.0) with Webshare proxy
+  * Method 2: New API (v1.1.0) direct connection  
+  * Method 3: Old API with Webshare proxy (via http_proxy)
+  * Method 4: Old API direct connection
+- 6 enhanced audio download strategies for bypassing bot detection
+- Playlist and channel video extraction with flat-mode optimization
+- URL detection for playlists, channels, and individual videos
+- Comprehensive metadata extraction for all content types
+- Async support with progress callbacks for long operations
+- Rate limiting respect and graceful handling of private/unavailable content
 - Integrated with backend configuration system
-- Enhanced error handling and logging
-- Support for all 6 enhanced download strategies
+- Comprehensive error handling and logging
+- Graceful fallback between all methods
+
+Migrated from appStreamlit.py with backend optimizations.
 """
 
 import os
@@ -42,7 +54,23 @@ logger = logging.getLogger(__name__)
 
 class YouTubeService:
     """
-    Service class for YouTube operations including video info, transcripts, and audio downloads.
+    Service class for YouTube operations including video info, transcripts, audio downloads,
+    playlist/channel extraction, and comprehensive metadata retrieval.
+    
+    New Methods:
+    - is_playlist_url(url): Check if URL is a YouTube playlist
+    - is_channel_url(url): Check if URL is a YouTube channel
+    - get_playlist_info(url): Get playlist metadata (title, description, video count)
+    - get_channel_info(url): Get channel metadata (title, description, video count, subscribers)
+    - extract_playlist_videos(url, max_videos): Extract all videos from a playlist
+    - extract_channel_videos(url, max_videos): Extract videos from a channel
+    
+    All new methods support:
+    - Async operation with progress callbacks
+    - Flat extraction mode for fast metadata-only retrieval
+    - Graceful handling of private/unavailable content
+    - Rate limiting respect
+    - Structured data output with video IDs, titles, durations
     """
     
     def __init__(self):
@@ -119,6 +147,65 @@ class YouTubeService:
             logger.error(f"Error parsing YouTube URL '{youtube_url}': {e}")
             
         return None
+
+    def is_playlist_url(self, url: str) -> bool:
+        """
+        Check if URL is a YouTube playlist URL.
+        
+        Args:
+            url: URL to check
+            
+        Returns:
+            bool: True if URL is a playlist URL
+        """
+        if not url:
+            return False
+            
+        try:
+            parsed_url = urlparse(url.strip())
+            
+            if parsed_url.hostname in ('www.youtube.com', 'youtube.com', 'm.youtube.com'):
+                # Check for playlist parameter
+                query_params = parse_qs(parsed_url.query)
+                if 'list' in query_params and query_params['list']:
+                    return True
+                # Check for playlist path
+                if parsed_url.path.startswith('/playlist'):
+                    return True
+                    
+        except Exception as e:
+            logger.error(f"Error checking if URL is playlist: {e}")
+            
+        return False
+
+    def is_channel_url(self, url: str) -> bool:
+        """
+        Check if URL is a YouTube channel URL.
+        
+        Args:
+            url: URL to check
+            
+        Returns:
+            bool: True if URL is a channel URL
+        """
+        if not url:
+            return False
+            
+        try:
+            parsed_url = urlparse(url.strip())
+            
+            if parsed_url.hostname in ('www.youtube.com', 'youtube.com', 'm.youtube.com'):
+                # Check for various channel URL patterns
+                if (parsed_url.path.startswith('/channel/') or
+                    parsed_url.path.startswith('/c/') or
+                    parsed_url.path.startswith('/@') or
+                    parsed_url.path.startswith('/user/')):
+                    return True
+                    
+        except Exception as e:
+            logger.error(f"Error checking if URL is channel: {e}")
+            
+        return False
 
     async def get_video_info(self, video_id: str, progress_callback: Optional[Callable[[str, float, str], None]] = None) -> Dict[str, Any]:
         """
@@ -206,6 +293,458 @@ class YouTubeService:
             logger.error(f"yt-dlp extraction failed: {e}")
             return None
 
+    async def get_playlist_info(self, playlist_url: str, progress_callback: Optional[Callable[[str, float, str], None]] = None) -> Dict[str, Any]:
+        """
+        Get playlist metadata using yt-dlp.
+        
+        Args:
+            playlist_url: YouTube playlist URL
+            progress_callback: Optional callback for progress updates (stage, progress, message)
+            
+        Returns:
+            Dict[str, Any]: Playlist information including title, description, video count, etc.
+        """
+        if progress_callback:
+            progress_callback("playlist_info", 0.0, "Fetching playlist information...")
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,  # Get flat list for fast metadata extraction
+            'playlist_items': '1',  # Only get first video to extract playlist metadata quickly
+        }
+        
+        try:
+            if progress_callback:
+                progress_callback("playlist_info", 0.3, "Extracting playlist metadata...")
+            
+            # Run yt-dlp in thread to avoid blocking async context
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(
+                None, 
+                lambda: self._extract_playlist_info_sync(playlist_url, ydl_opts)
+            )
+            
+            if progress_callback:
+                progress_callback("playlist_info", 0.7, "Processing playlist metadata...")
+            
+            if info:
+                if progress_callback:
+                    progress_callback("playlist_info", 1.0, f"Retrieved info for playlist: {info.get('title', 'Unknown')}")
+                
+                return {
+                    'title': info.get('title', 'Unknown Playlist'),
+                    'id': info.get('id', ''),
+                    'url': playlist_url,
+                    'description': info.get('description', ''),
+                    'uploader': info.get('uploader', ''),
+                    'uploader_id': info.get('uploader_id', ''),
+                    'video_count': info.get('playlist_count', 0),
+                    'view_count': info.get('view_count', 0),
+                    'thumbnail': info.get('thumbnail', ''),
+                }
+                
+        except Exception as e:
+            logger.warning(f"Could not fetch playlist info for {playlist_url}: {e}")
+            if progress_callback:
+                progress_callback("playlist_info", 1.0, f"Failed to fetch playlist info: {str(e)[:50]}...")
+            
+        # Return minimal info on failure
+        if progress_callback:
+            progress_callback("playlist_info", 1.0, "Using fallback playlist information")
+        
+        return {
+            'title': 'Unknown Playlist',
+            'id': '',
+            'url': playlist_url,
+            'description': '',
+            'uploader': '',
+            'uploader_id': '',
+            'video_count': 0,
+            'view_count': 0,
+            'thumbnail': '',
+        }
+
+    async def get_channel_info(self, channel_url: str, progress_callback: Optional[Callable[[str, float, str], None]] = None) -> Dict[str, Any]:
+        """
+        Get channel metadata using yt-dlp.
+        
+        Args:
+            channel_url: YouTube channel URL
+            progress_callback: Optional callback for progress updates (stage, progress, message)
+            
+        Returns:
+            Dict[str, Any]: Channel information including title, description, video count, etc.
+        """
+        if progress_callback:
+            progress_callback("channel_info", 0.0, "Fetching channel information...")
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,  # Get flat list for fast metadata extraction
+            'playlist_items': '1',  # Only get first video to extract channel metadata quickly
+        }
+        
+        try:
+            if progress_callback:
+                progress_callback("channel_info", 0.3, "Extracting channel metadata...")
+            
+            # Run yt-dlp in thread to avoid blocking async context
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(
+                None, 
+                lambda: self._extract_playlist_info_sync(channel_url, ydl_opts)
+            )
+            
+            if progress_callback:
+                progress_callback("channel_info", 0.7, "Processing channel metadata...")
+            
+            if info:
+                if progress_callback:
+                    progress_callback("channel_info", 1.0, f"Retrieved info for channel: {info.get('title', 'Unknown')}")
+                
+                return {
+                    'title': info.get('title', 'Unknown Channel'),
+                    'id': info.get('id', ''),
+                    'url': channel_url,
+                    'description': info.get('description', ''),
+                    'uploader': info.get('uploader', ''),
+                    'uploader_id': info.get('uploader_id', ''),
+                    'video_count': info.get('playlist_count', 0),
+                    'view_count': info.get('view_count', 0),
+                    'subscriber_count': info.get('subscriber_count', 0),
+                    'thumbnail': info.get('thumbnail', ''),
+                }
+                
+        except Exception as e:
+            logger.warning(f"Could not fetch channel info for {channel_url}: {e}")
+            if progress_callback:
+                progress_callback("channel_info", 1.0, f"Failed to fetch channel info: {str(e)[:50]}...")
+            
+        # Return minimal info on failure
+        if progress_callback:
+            progress_callback("channel_info", 1.0, "Using fallback channel information")
+        
+        return {
+            'title': 'Unknown Channel',
+            'id': '',
+            'url': channel_url,
+            'description': '',
+            'uploader': '',
+            'uploader_id': '',
+            'video_count': 0,
+            'view_count': 0,
+            'subscriber_count': 0,
+            'thumbnail': '',
+        }
+
+    async def extract_playlist_videos(
+        self, 
+        playlist_url: str, 
+        max_videos: Optional[int] = None,
+        progress_callback: Optional[Callable[[str, float, str], None]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Extract all videos from a YouTube playlist URL using flat extraction for speed.
+        
+        Args:
+            playlist_url: YouTube playlist URL
+            max_videos: Optional maximum number of videos to extract
+            progress_callback: Optional callback for progress updates (stage, progress, message)
+            
+        Returns:
+            List[Dict[str, Any]]: List of video information dictionaries
+        """
+        if progress_callback:
+            progress_callback("playlist_extraction", 0.0, "Starting playlist video extraction...")
+        
+        # Set up playlist items range if max_videos specified
+        playlist_items = f"1:{max_videos}" if max_videos else None
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True,  # Fast flat extraction - only metadata, no streams
+            'playlist_items': playlist_items,
+        }
+        
+        try:
+            if progress_callback:
+                progress_callback("playlist_extraction", 0.2, "Extracting playlist metadata...")
+            
+            # Run yt-dlp in thread to avoid blocking async context
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(
+                None, 
+                lambda: self._extract_playlist_info_sync(playlist_url, ydl_opts)
+            )
+            
+            if progress_callback:
+                progress_callback("playlist_extraction", 0.6, "Processing video entries...")
+            
+            videos = []
+            if info and 'entries' in info:
+                total_entries = len(info['entries'])
+                
+                for i, entry in enumerate(info['entries']):
+                    if entry is None:  # Skip unavailable/private videos
+                        continue
+                        
+                    try:
+                        # Extract duration if available
+                        duration = 0
+                        if 'duration' in entry and entry['duration']:
+                            duration = entry['duration']
+                        elif 'duration_string' in entry:
+                            duration = self._parse_duration_string(entry['duration_string'])
+                        
+                        video_info = {
+                            'id': entry.get('id', ''),
+                            'title': entry.get('title', f"Video {i+1}"),
+                            'url': f"https://www.youtube.com/watch?v={entry.get('id', '')}" if entry.get('id') else '',
+                            'duration': duration,
+                            'duration_string': entry.get('duration_string', ''),
+                            'uploader': entry.get('uploader') or channel_name,
+                            'channel': entry.get('channel') or channel_name,
+                            'channel_id': entry.get('channel_id') or channel_id,
+                            'view_count': entry.get('view_count', 0),
+                            'thumbnail': entry.get('thumbnail', ''),
+                            'description': entry.get('description', ''),
+                            'upload_date': entry.get('upload_date', ''),
+                            'availability': entry.get('availability', 'public'),
+                        }
+                        videos.append(video_info)
+                        
+                        # Update progress
+                        if progress_callback and total_entries > 0:
+                            progress = 0.6 + (i / total_entries) * 0.35
+                            progress_callback("playlist_extraction", progress, f"Processed {i+1}/{total_entries} videos")
+                            
+                    except Exception as e:
+                        logger.warning(f"Error processing playlist entry {i}: {e}")
+                        continue
+            
+            if progress_callback:
+                progress_callback("playlist_extraction", 1.0, f"Extracted {len(videos)} videos from playlist")
+            
+            logger.info(f"Successfully extracted {len(videos)} videos from playlist")
+            return videos
+            
+        except Exception as e:
+            logger.error(f"Error extracting playlist videos: {e}")
+            if progress_callback:
+                progress_callback("playlist_extraction", 1.0, f"Failed to extract playlist: {str(e)[:50]}...")
+            return []
+
+    async def extract_channel_videos(
+        self, 
+        channel_url: str, 
+        max_videos: Optional[int] = None,
+        progress_callback: Optional[Callable[[str, float, str], None]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Extract videos from a YouTube channel URL using flat extraction for speed.
+        
+        Args:
+            channel_url: YouTube channel URL  
+            max_videos: Optional maximum number of videos to extract
+            progress_callback: Optional callback for progress updates (stage, progress, message)
+            
+        Returns:
+            List[Dict[str, Any]]: List of video information dictionaries
+        """
+        if progress_callback:
+            progress_callback("channel_extraction", 0.0, "Starting channel video extraction...")
+        
+        # Convert channel URL to uploads playlist URL
+        # YouTube channels have their uploads in a special playlist
+        uploads_url = channel_url
+        
+        # If it's a channel URL, we need to get the uploads playlist
+        # yt-dlp can handle this by appending /videos to channel URLs
+        if self.is_channel_url(channel_url):
+            # Ensure the URL ends with /videos to get the uploads tab
+            if not channel_url.rstrip('/').endswith('/videos'):
+                uploads_url = channel_url.rstrip('/') + '/videos'
+        
+        # Set up playlist items range if max_videos specified
+        playlist_items = f"1:{max_videos}" if max_videos else None
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': 'in_playlist',  # Extract videos in playlist mode
+            'playlist_items': playlist_items,
+        }
+        
+        try:
+            if progress_callback:
+                progress_callback("channel_extraction", 0.2, "Extracting channel uploads...")
+            
+            # Run yt-dlp in thread to avoid blocking async context
+            loop = asyncio.get_event_loop()
+            info = await loop.run_in_executor(
+                None, 
+                lambda: self._extract_playlist_info_sync(uploads_url, ydl_opts)
+            )
+            
+            if progress_callback:
+                progress_callback("channel_extraction", 0.6, "Processing video entries...")
+            
+            videos = []
+            if info and 'entries' in info:
+                total_entries = len(info['entries'])
+                logger.info(f"Found {total_entries} entries in channel extraction")
+                
+                # Extract channel name from the playlist info
+                channel_name = info.get('uploader') or info.get('channel') or info.get('uploader_id') or ''
+                channel_id = info.get('channel_id') or info.get('uploader_id') or ''
+                
+                for i, entry in enumerate(info['entries']):
+                    if entry is None:  # Skip unavailable/private videos
+                        continue
+                    
+                    # Log entry type to debug if we're getting playlists instead of videos
+                    entry_type = entry.get('_type', 'unknown')
+                    if entry_type != 'url' and 'id' not in entry:
+                        logger.warning(f"Skipping non-video entry {i}: type={entry_type}, title={entry.get('title', 'N/A')}")
+                        continue
+                        
+                    try:
+                        # Extract duration if available
+                        duration = 0
+                        if 'duration' in entry and entry['duration']:
+                            duration = entry['duration']
+                        elif 'duration_string' in entry:
+                            duration = self._parse_duration_string(entry['duration_string'])
+                        
+                        video_info = {
+                            'id': entry.get('id', ''),
+                            'title': entry.get('title', f"Video {i+1}"),
+                            'url': f"https://www.youtube.com/watch?v={entry.get('id', '')}" if entry.get('id') else '',
+                            'duration': duration,
+                            'duration_string': entry.get('duration_string', ''),
+                            'uploader': entry.get('uploader') or channel_name,
+                            'channel': entry.get('channel') or channel_name,
+                            'channel_id': entry.get('channel_id') or channel_id,
+                            'view_count': entry.get('view_count', 0),
+                            'thumbnail': entry.get('thumbnail', ''),
+                            'description': entry.get('description', ''),
+                            'upload_date': entry.get('upload_date', ''),
+                            'availability': entry.get('availability', 'public'),
+                        }
+                        videos.append(video_info)
+                        
+                        # Update progress
+                        if progress_callback and total_entries > 0:
+                            progress = 0.6 + (i / total_entries) * 0.35
+                            progress_callback("channel_extraction", progress, f"Processed {i+1}/{total_entries} videos")
+                            
+                    except Exception as e:
+                        logger.warning(f"Error processing channel entry {i}: {e}")
+                        continue
+            
+            if progress_callback:
+                progress_callback("channel_extraction", 1.0, f"Extracted {len(videos)} videos from channel")
+            
+            # If no videos found and we used /videos URL, try alternative approach
+            if len(videos) == 0 and uploads_url != channel_url:
+                logger.warning(f"No videos found with /videos URL, trying alternative extraction")
+                if progress_callback:
+                    progress_callback("channel_extraction", 0.8, "Trying alternative extraction method...")
+                
+                # Try with the original URL and different options
+                alt_ydl_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': True,
+                    'playlist_items': playlist_items,
+                    'playlistend': max_videos if max_videos else 50,  # Limit to reasonable number
+                }
+                
+                try:
+                    alt_info = await loop.run_in_executor(
+                        None,
+                        lambda: self._extract_playlist_info_sync(channel_url + '/videos', alt_ydl_opts)
+                    )
+                    
+                    if alt_info and 'entries' in alt_info:
+                        for entry in alt_info['entries']:
+                            if entry and entry.get('id') and entry.get('_type', '') != 'playlist':
+                                videos.append({
+                                    'id': entry.get('id', ''),
+                                    'title': entry.get('title', 'Unknown'),
+                                    'url': f"https://www.youtube.com/watch?v={entry.get('id', '')}",
+                                    'duration': entry.get('duration', 0),
+                                    'duration_string': entry.get('duration_string', ''),
+                                    'uploader': entry.get('uploader', ''),
+                                    'view_count': entry.get('view_count', 0),
+                                    'thumbnail': entry.get('thumbnail', ''),
+                                    'description': entry.get('description', ''),
+                                    'upload_date': entry.get('upload_date', ''),
+                                    'availability': entry.get('availability', 'public'),
+                                })
+                except Exception as alt_e:
+                    logger.warning(f"Alternative extraction also failed: {alt_e}")
+            
+            logger.info(f"Successfully extracted {len(videos)} videos from channel")
+            
+            # Add channel metadata to the result
+            if videos and channel_name:
+                for video in videos:
+                    if not video.get('uploader'):
+                        video['uploader'] = channel_name
+                    if not video.get('channel'):
+                        video['channel'] = channel_name
+                        
+            return videos
+            
+        except Exception as e:
+            logger.error(f"Error extracting channel videos: {e}")
+            if progress_callback:
+                progress_callback("channel_extraction", 1.0, f"Failed to extract channel: {str(e)[:50]}...")
+            return []
+
+    def _parse_duration_string(self, duration_str: str) -> int:
+        """
+        Parse duration string (e.g., "3:45", "1:23:45") to seconds.
+        
+        Args:
+            duration_str: Duration string in various formats
+            
+        Returns:
+            int: Duration in seconds
+        """
+        if not duration_str:
+            return 0
+            
+        try:
+            # Handle format like "1:23:45" or "3:45" or "45"
+            parts = duration_str.split(':')
+            if len(parts) == 1:
+                # Just seconds
+                return int(parts[0])
+            elif len(parts) == 2:
+                # Minutes:seconds
+                return int(parts[0]) * 60 + int(parts[1])
+            elif len(parts) == 3:
+                # Hours:minutes:seconds
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        except (ValueError, IndexError):
+            logger.warning(f"Could not parse duration string: {duration_str}")
+            
+        return 0
+
+    def _extract_playlist_info_sync(self, url: str, ydl_opts: dict) -> Optional[dict]:
+        """Synchronous playlist/channel info extraction for use in thread executor."""
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+        except Exception as e:
+            logger.error(f"yt-dlp playlist extraction failed: {e}")
+            return None
+
     @retry(
         retry=retry_if_exception_type(Exception),
         stop=stop_after_attempt(4),
@@ -213,8 +752,12 @@ class YouTubeService:
     )
     async def fetch_transcript_segments(self, video_id: str, progress_callback: Optional[Callable[[str, float, str], None]] = None) -> Tuple[Optional[List[Dict]], Optional[str], Optional[str]]:
         """
-        Fetch transcript segments using youtube-transcript-api v1.1.0 with Webshare proxy support
-        and robust retry logic with exponential backoff.
+        Fetch transcript segments using robust 4-method fallback strategy.
+        
+        Method 1: New API (v1.1.0) with Webshare proxy
+        Method 2: New API (v1.1.0) direct connection  
+        Method 3: Old API with Webshare proxy (via http_proxy)
+        Method 4: Old API direct connection
         
         Args:
             video_id: YouTube video ID
@@ -227,82 +770,107 @@ class YouTubeService:
         logger.info(f"Attempting to fetch transcript for video_id: {video_id}")
         
         if progress_callback:
-            progress_callback("transcript", 0.0, "Initializing transcript fetch...")
+            progress_callback("transcript", 0.0, "Initializing 4-method transcript fetch...")
         
+        # Get Webshare credentials from settings
+        webshare_username, webshare_password = self._get_webshare_credentials()
+        
+        # Method 1: Try new API (v1.1.0) with Webshare proxy
+        if webshare_username and webshare_password:
+            try:
+                if progress_callback:
+                    progress_callback("transcript", 0.1, "Method 1: New API with Webshare proxy...")
+                
+                result = await self._try_new_api_with_proxy(video_id, webshare_username, webshare_password, progress_callback)
+                if result[0] is not None:  # Success
+                    if progress_callback:
+                        progress_callback("transcript", 1.0, f"Method 1 successful! Found {len(result[0])} segments")
+                    return result
+                    
+            except Exception as e:
+                logger.warning(f"Method 1 (new API + proxy) failed: {e}")
+                if progress_callback:
+                    progress_callback("transcript", 0.2, f"Method 1 failed: {str(e)[:50]}...")
+        
+        # Method 2: Try new API (v1.1.0) direct connection
         try:
-            # Import the new v1.1.0 components if available
+            if progress_callback:
+                progress_callback("transcript", 0.25, "Method 2: New API direct connection...")
+            
+            result = await self._try_new_api_direct(video_id, progress_callback)
+            if result[0] is not None:  # Success
+                if progress_callback:
+                    progress_callback("transcript", 1.0, f"Method 2 successful! Found {len(result[0])} segments")
+                return result
+                
+        except Exception as e:
+            logger.warning(f"Method 2 (new API direct) failed: {e}")
+            if progress_callback:
+                progress_callback("transcript", 0.5, f"Method 2 failed: {str(e)[:50]}...")
+        
+        # Method 3: Try old API with Webshare proxy (via http_proxy)
+        if webshare_username and webshare_password:
+            try:
+                if progress_callback:
+                    progress_callback("transcript", 0.6, "Method 3: Old API with Webshare proxy...")
+                
+                result = await self._try_old_api_with_proxy(video_id, webshare_username, webshare_password, progress_callback)
+                if result[0] is not None:  # Success
+                    if progress_callback:
+                        progress_callback("transcript", 1.0, f"Method 3 successful! Found {len(result[0])} segments")
+                    return result
+                    
+            except Exception as e:
+                logger.warning(f"Method 3 (old API + proxy) failed: {e}")
+                if progress_callback:
+                    progress_callback("transcript", 0.75, f"Method 3 failed: {str(e)[:50]}...")
+        
+        # Method 4: Try old API direct connection (last resort)
+        try:
+            if progress_callback:
+                progress_callback("transcript", 0.8, "Method 4: Old API direct connection...")
+            
+            result = await self._try_old_api_direct(video_id, progress_callback)
+            if result[0] is not None:  # Success
+                if progress_callback:
+                    progress_callback("transcript", 1.0, f"Method 4 successful! Found {len(result[0])} segments")
+                return result
+                
+        except Exception as e:
+            logger.error(f"Method 4 (old API direct) failed: {e}")
+            if progress_callback:
+                progress_callback("transcript", 1.0, f"All 4 methods failed. Last error: {str(e)[:50]}...")
+        
+        # All methods failed
+        error_msg = "All 4 transcript fetch methods failed"
+        logger.error(error_msg)
+        return None, None, error_msg
+
+    async def _try_new_api_with_proxy(self, video_id: str, webshare_username: str, webshare_password: str, progress_callback: Optional[Callable[[str, float, str], None]]) -> Tuple[Optional[List[Dict]], Optional[str], Optional[str]]:
+        """Method 1: New API (v1.1.0) with Webshare proxy."""
+        try:
             from youtube_transcript_api.proxies import WebshareProxyConfig
             
             if progress_callback:
-                progress_callback("transcript", 0.1, "Loading transcript API configuration...")
+                progress_callback("transcript", 0.15, "Method 1: Setting up Webshare proxy config...")
             
-            # Import webshare credentials function
-            import sys
-            import os
-            sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
-            from config_loader import get_webshare_credentials
-            
-            # Get Webshare credentials
-            webshare_username, webshare_password = get_webshare_credentials()
-            
-            if progress_callback:
-                progress_callback("transcript", 0.2, "Setting up connection method...")
-            
-            # Try with Webshare proxy first, fallback to direct connection
-            transcript = None
-            
-            if webshare_username and webshare_password:
-                try:
-                    if progress_callback:
-                        progress_callback("transcript", 0.3, "Connecting via Webshare proxy...")
-                    
-                    logger.info("Using Webshare proxy for enhanced reliability")
-                    proxy_config = WebshareProxyConfig(
-                        proxy_username=webshare_username,
-                        proxy_password=webshare_password,
-                        retries_when_blocked=3
-                    )
-                    ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
-                    
-                    if progress_callback:
-                        progress_callback("transcript", 0.6, "Fetching transcript via proxy...")
-                    
-                    transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
-                    logger.info("Webshare proxy successful!")
-                    
-                except Exception as proxy_error:
-                    if progress_callback:
-                        progress_callback("transcript", 0.4, "Proxy failed, trying direct connection...")
-                    
-                    logger.warning(f"Webshare proxy failed ({proxy_error}), falling back to direct connection")
-                    ytt_api = YouTubeTranscriptApi()
-                    transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
-                    logger.info("Direct connection successful!")
-            else:
-                if progress_callback:
-                    progress_callback("transcript", 0.3, "Using direct connection to YouTube...")
-                
-                logger.info("No Webshare credentials found, using direct connection")
-                ytt_api = YouTubeTranscriptApi()
-                
-                if progress_callback:
-                    progress_callback("transcript", 0.6, "Fetching transcript directly...")
-                
-                transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
-                logger.info("Direct connection successful!")
+            logger.info("Method 1: Using new API with Webshare proxy")
+            proxy_config = WebshareProxyConfig(
+                proxy_username=webshare_username,
+                proxy_password=webshare_password,
+                retries_when_blocked=3
+            )
+            ytt_api = YouTubeTranscriptApi(proxy_config=proxy_config)
             
             if progress_callback:
-                progress_callback("transcript", 0.8, "Validating transcript data...")
+                progress_callback("transcript", 0.18, "Method 1: Fetching transcript via proxy...")
+            
+            transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
             
             if not transcript or not transcript.snippets:
-                raise ValueError("Fetched transcript data is empty.")
-
-            logger.info("Successfully fetched and validated transcript segments.")
+                raise ValueError("Method 1: Fetched transcript data is empty")
             
-            if progress_callback:
-                progress_callback("transcript", 0.9, "Converting transcript format...")
-            
-            # Convert FetchedTranscriptSnippet objects to dict format for compatibility
+            # Convert to dict format
             segments = []
             for snippet in transcript.snippets:
                 segments.append({
@@ -311,49 +879,127 @@ class YouTubeService:
                     'duration': snippet.duration
                 })
             
-            if progress_callback:
-                progress_callback("transcript", 1.0, f"Transcript ready! Found {len(segments)} segments")
-            
+            logger.info("Method 1: Successfully fetched transcript with new API + proxy")
             return segments, transcript.language, None
-
-        except ImportError:
-            # Fallback to old API if new version not available
-            if progress_callback:
-                progress_callback("transcript", 0.3, "Using fallback transcript API...")
             
-            logger.info("Using fallback to old youtube-transcript-api")
-            try:
-                if progress_callback:
-                    progress_callback("transcript", 0.5, "Fetching with legacy API...")
-                
-                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-                transcript_obj = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
-                fetched_segments = transcript_obj.fetch()
-
-                if progress_callback:
-                    progress_callback("transcript", 0.8, "Validating fallback transcript...")
-
-                if not fetched_segments:
-                    raise ValueError("Fetched transcript data is empty.")
-
-                logger.info("Successfully fetched and validated transcript segments (fallback).")
-                
-                if progress_callback:
-                    progress_callback("transcript", 1.0, f"Fallback successful! Found {len(fetched_segments)} segments")
-                
-                return fetched_segments, transcript_obj.language, None
-                
-            except Exception as fallback_error:
-                logger.error(f"Fallback transcript fetch failed: {fallback_error}")
-                if progress_callback:
-                    progress_callback("transcript", 1.0, f"Fallback failed: {str(fallback_error)[:50]}...")
-                return None, None, str(fallback_error)
-
+        except ImportError:
+            raise Exception("New API v1.1.0 with proxy support not available")
         except Exception as e:
-            logger.error(f"Transcript fetch error. Tenacity will handle the retry. Error: {e}")
+            raise Exception(f"Method 1 error: {e}")
+
+    async def _try_new_api_direct(self, video_id: str, progress_callback: Optional[Callable[[str, float, str], None]]) -> Tuple[Optional[List[Dict]], Optional[str], Optional[str]]:
+        """Method 2: New API (v1.1.0) direct connection."""
+        try:
+            # Try to import new API components to confirm v1.1.0 is available
+            from youtube_transcript_api.proxies import WebshareProxyConfig
+            
             if progress_callback:
-                progress_callback("transcript", 0.5, f"Retrying transcript fetch... Error: {str(e)[:50]}...")
-            raise e  # Re-raise the exception for tenacity to catch
+                progress_callback("transcript", 0.35, "Method 2: Connecting directly to YouTube...")
+            
+            logger.info("Method 2: Using new API direct connection")
+            ytt_api = YouTubeTranscriptApi()
+            
+            if progress_callback:
+                progress_callback("transcript", 0.4, "Method 2: Fetching transcript directly...")
+            
+            transcript = ytt_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
+            
+            if not transcript or not transcript.snippets:
+                raise ValueError("Method 2: Fetched transcript data is empty")
+            
+            # Convert to dict format
+            segments = []
+            for snippet in transcript.snippets:
+                segments.append({
+                    'text': snippet.text,
+                    'start': snippet.start,
+                    'duration': snippet.duration
+                })
+            
+            logger.info("Method 2: Successfully fetched transcript with new API direct")
+            return segments, transcript.language, None
+            
+        except ImportError:
+            raise Exception("New API v1.1.0 not available")
+        except Exception as e:
+            raise Exception(f"Method 2 error: {e}")
+
+    async def _try_old_api_with_proxy(self, video_id: str, webshare_username: str, webshare_password: str, progress_callback: Optional[Callable[[str, float, str], None]]) -> Tuple[Optional[List[Dict]], Optional[str], Optional[str]]:
+        """Method 3: Old API with Webshare proxy via environment variables."""
+        import os
+        
+        if progress_callback:
+            progress_callback("transcript", 0.65, "Method 3: Setting up proxy environment...")
+        
+        # Store original proxy settings
+        original_http_proxy = os.environ.get('http_proxy')
+        original_https_proxy = os.environ.get('https_proxy')
+        
+        try:
+            # Set up proxy via environment variables for old API
+            proxy_url = f"http://{webshare_username}:{webshare_password}@p.webshare.io:80"
+            os.environ['http_proxy'] = proxy_url
+            os.environ['https_proxy'] = proxy_url
+            
+            if progress_callback:
+                progress_callback("transcript", 0.68, "Method 3: Using old API with proxy...")
+            
+            logger.info("Method 3: Using old API with Webshare proxy via environment")
+            
+            # Use old API method
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript_obj = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+            
+            if progress_callback:
+                progress_callback("transcript", 0.72, "Method 3: Fetching segments...")
+            
+            fetched_segments = transcript_obj.fetch()
+            
+            if not fetched_segments:
+                raise ValueError("Method 3: Fetched transcript data is empty")
+            
+            logger.info("Method 3: Successfully fetched transcript with old API + proxy")
+            return fetched_segments, transcript_obj.language, None
+            
+        except Exception as e:
+            raise Exception(f"Method 3 error: {e}")
+        finally:
+            # Restore original proxy settings
+            if original_http_proxy is not None:
+                os.environ['http_proxy'] = original_http_proxy
+            else:
+                os.environ.pop('http_proxy', None)
+                
+            if original_https_proxy is not None:
+                os.environ['https_proxy'] = original_https_proxy  
+            else:
+                os.environ.pop('https_proxy', None)
+
+    async def _try_old_api_direct(self, video_id: str, progress_callback: Optional[Callable[[str, float, str], None]]) -> Tuple[Optional[List[Dict]], Optional[str], Optional[str]]:
+        """Method 4: Old API direct connection."""
+        try:
+            if progress_callback:
+                progress_callback("transcript", 0.85, "Method 4: Using old API direct...")
+            
+            logger.info("Method 4: Using old API direct connection")
+            
+            # Use old API method
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript_obj = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+            
+            if progress_callback:
+                progress_callback("transcript", 0.9, "Method 4: Fetching segments...")
+            
+            fetched_segments = transcript_obj.fetch()
+            
+            if not fetched_segments:
+                raise ValueError("Method 4: Fetched transcript data is empty")
+            
+            logger.info("Method 4: Successfully fetched transcript with old API direct")
+            return fetched_segments, transcript_obj.language, None
+            
+        except Exception as e:
+            raise Exception(f"Method 4 error: {e}")
 
     async def download_audio_as_mp3_enhanced(
         self, 
@@ -400,112 +1046,129 @@ class YouTubeService:
         if progress_callback:
             progress_callback("setup", 0.2, "Trying enhanced download strategies...")
         
+        # Strategy 0: Latest 2025 method with browser cookies
+        try:
+            if progress_callback:
+                progress_callback("downloading", 0.15, "Strategy 0: Trying latest 2025 method with browser cookies...")
+                
+            result = await self._download_with_strategy_2025(
+                video_url, output_dir, safe_title, final_mp3_path, progress_callback
+            )
+            if result:
+                if progress_callback:
+                    progress_callback("downloading", 1.0, "Downloaded with 2025 method!")
+                return result
+                
+        except Exception as e:
+            if progress_callback:
+                progress_callback("downloading", 0.2, f"Strategy 0 failed: {str(e)[:100]}...")
+        
         # Strategy 1: yt-dlp with cookie file (if available)
         if cookie_file:
             try:
                 if progress_callback:
-                    progress_callback("download", 0.3, "Strategy 1: yt-dlp with cookie authentication...")
+                    progress_callback("downloading", 0.3, "Strategy 1: yt-dlp with cookie authentication...")
                     
                 result = await self._download_with_strategy_1(
                     video_url, output_dir, safe_title, cookie_file, final_mp3_path, progress_callback
                 )
                 if result:
                     if progress_callback:
-                        progress_callback("download", 1.0, "Downloaded with cookie authentication!")
+                        progress_callback("downloading", 1.0, "Downloaded with cookie authentication!")
                     return result
                     
             except Exception as e:
                 if progress_callback:
-                    progress_callback("download", 0.3, f"Cookie strategy failed: {str(e)[:100]}...")
+                    progress_callback("downloading", 0.3, f"Cookie strategy failed: {str(e)[:100]}...")
         
         # Strategy 2: yt-dlp with advanced anti-bot headers
         try:
             if progress_callback:
-                progress_callback("download", 0.4, "Strategy 2: yt-dlp with anti-bot headers...")
+                progress_callback("downloading", 0.4, "Strategy 2: yt-dlp with anti-bot headers...")
                 
             result = await self._download_with_strategy_2(
                 video_url, output_dir, safe_title, cookie_file, final_mp3_path, progress_callback
             )
             if result:
                 if progress_callback:
-                    progress_callback("download", 1.0, "Downloaded with iOS client simulation!")
+                    progress_callback("downloading", 1.0, "Downloaded with iOS client simulation!")
                 return result
                 
         except Exception as e:
             if progress_callback:
-                progress_callback("download", 0.4, f"Strategy 2 failed: {str(e)[:100]}...")
+                progress_callback("downloading", 0.4, f"Strategy 2 failed: {str(e)[:100]}...")
         
         # Strategy 3: yt-dlp with TV client
         try:
             if progress_callback:
-                progress_callback("download", 0.5, "Strategy 3: yt-dlp with TV client...")
+                progress_callback("downloading", 0.5, "Strategy 3: yt-dlp with TV client...")
                 
             result = await self._download_with_strategy_3(
                 video_url, output_dir, safe_title, cookie_file, final_mp3_path, progress_callback
             )
             if result:
                 if progress_callback:
-                    progress_callback("download", 1.0, "Downloaded with TV client!")
+                    progress_callback("downloading", 1.0, "Downloaded with TV client!")
                 return result
                 
         except Exception as e:
             if progress_callback:
-                progress_callback("download", 0.5, f"Strategy 3 failed: {str(e)[:100]}...")
+                progress_callback("downloading", 0.5, f"Strategy 3 failed: {str(e)[:100]}...")
         
         # Strategy 4: pytube fallback
         try:
             if progress_callback:
-                progress_callback("download", 0.6, "Strategy 4: Trying pytube...")
+                progress_callback("downloading", 0.6, "Strategy 4: Trying pytube...")
                 
             result = await self._download_with_strategy_4(
                 video_url, output_dir, safe_title, final_mp3_path, progress_callback
             )
             if result:
                 if progress_callback:
-                    progress_callback("download", 1.0, "Downloaded with pytube!")
+                    progress_callback("downloading", 1.0, "Downloaded with pytube!")
                 return result
                 
         except Exception as e:
             if progress_callback:
-                progress_callback("download", 0.6, f"Strategy 4 failed: {str(e)[:100]}...")
+                progress_callback("downloading", 0.6, f"Strategy 4 failed: {str(e)[:100]}...")
         
         # Strategy 5: yt-dlp with embedded client
         try:
             if progress_callback:
-                progress_callback("download", 0.7, "Strategy 5: yt-dlp with embedded client...")
+                progress_callback("downloading", 0.7, "Strategy 5: yt-dlp with embedded client...")
                 
             result = await self._download_with_strategy_5(
                 video_url, output_dir, safe_title, cookie_file, final_mp3_path, progress_callback
             )
             if result:
                 if progress_callback:
-                    progress_callback("download", 1.0, "Downloaded with embedded client!")
+                    progress_callback("downloading", 1.0, "Downloaded with embedded client!")
                 return result
                 
         except Exception as e:
             if progress_callback:
-                progress_callback("download", 0.7, f"Strategy 5 failed: {str(e)[:100]}...")
+                progress_callback("downloading", 0.7, f"Strategy 5 failed: {str(e)[:100]}...")
         
         # Strategy 6: moviepy + youtube-dl fallback
         try:
             if progress_callback:
-                progress_callback("download", 0.8, "Strategy 6: Trying moviepy extraction...")
+                progress_callback("downloading", 0.8, "Strategy 6: Trying moviepy extraction...")
                 
             result = await self._download_with_strategy_6(
                 video_url, output_dir, safe_title, final_mp3_path, progress_callback
             )
             if result:
                 if progress_callback:
-                    progress_callback("download", 1.0, "Downloaded with moviepy!")
+                    progress_callback("downloading", 1.0, "Downloaded with moviepy!")
                 return result
                 
         except Exception as e:
             if progress_callback:
-                progress_callback("download", 0.8, f"Strategy 6 failed: {str(e)[:100]}...")
+                progress_callback("downloading", 0.8, f"Strategy 6 failed: {str(e)[:100]}...")
         
         # All strategies failed
         if progress_callback:
-            progress_callback("download", 0.9, "All enhanced download strategies failed!")
+            progress_callback("downloading", 0.9, "All enhanced download strategies failed!")
         
         logger.error("All enhanced download strategies failed")
         return None
@@ -535,6 +1198,58 @@ class YouTubeService:
         await loop.run_in_executor(None, lambda: self._download_sync(video_url, ydl_opts))
         
         return final_mp3_path if os.path.exists(final_mp3_path) else None
+
+    async def _download_with_strategy_2025(self, video_url: str, output_dir: str, safe_title: str,
+                                          final_mp3_path: str, progress_callback: Optional[Callable[[str, float, str], None]]) -> Optional[str]:
+        """Strategy 2025: Latest method with browser cookies and format selection."""
+        ydl_opts = {
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': os.path.join(output_dir, f"{safe_title}.%(ext)s"),
+            'quiet': True,
+            'no_warnings': True,
+            # Use cookies from browser automatically
+            'cookiesfrombrowser': ('chrome',),  # Try Chrome first, can also use 'firefox', 'edge'
+            # Latest 2025 extractor args
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web', 'android', 'ios'],
+                    'skip': ['dash', 'hls'],  # Skip problematic formats
+                    'formats': 'missing_pot',  # Handle missing PO tokens
+                }
+            },
+            # Update yt-dlp before downloading
+            'update': True,
+            # Force IPv4 to avoid IPv6 issues
+            'source_address': '0.0.0.0',
+            # Latest user agent
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
+        }
+        
+        # Add progress hook if callback provided
+        if progress_callback:
+            def progress_hook(d):
+                if d['status'] == 'downloading':
+                    percent = d.get('_percent_str', '0%').strip('%')
+                    try:
+                        progress_callback("downloading", float(percent) / 100, f"Downloading: {percent}%")
+                    except:
+                        pass
+            ydl_opts['progress_hooks'] = [progress_hook]
+        
+        try:
+            import yt_dlp
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([video_url])
+            
+            return final_mp3_path if os.path.exists(final_mp3_path) else None
+        except Exception as e:
+            logger.error(f"Strategy 2025 failed: {e}")
+            raise
 
     async def _download_with_strategy_2(self, video_url: str, output_dir: str, safe_title: str,
                                       cookie_file: Optional[str], final_mp3_path: str, progress_callback: Optional[Callable[[str, float, str], None]]) -> Optional[str]:
@@ -987,6 +1702,23 @@ class YouTubeService:
             minutes = int(match.group(2)) if match.group(2) else 0
             seconds = int(match.group(3)) if match.group(3) else 0
             return hours * 3600 + minutes * 60 + seconds
+
+    def _get_webshare_credentials(self) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Get Webshare proxy credentials from settings.
+        
+        Returns:
+            Tuple[Optional[str], Optional[str]]: (username, password) or (None, None) if not found
+        """
+        username = self.settings.webshare_username
+        password = self.settings.webshare_password
+        
+        if username and password:
+            logger.info("Webshare credentials found in settings")
+            return username, password
+        else:
+            logger.warning("No Webshare credentials found in settings")
+            return None, None
 
     async def cleanup_temp_files(self, file_patterns: Optional[List[str]] = None) -> None:
         """
