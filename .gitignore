@@ -72,8 +72,8 @@ test_downloads/
 #apiKeys
 backend/.env
 
-# Patch files in sql directory and Python files in tests directory
-backend/sql/*.patch
-backend/tests/*.py
+# SQL and test directories (keep local only)
+backend/sql/
+backend/tests/
 
 misc/
