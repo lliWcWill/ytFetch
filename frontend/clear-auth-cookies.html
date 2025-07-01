@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Clear ytFetch Auth Cookies</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background: #2563eb;
+        }
+        .output {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 14px;
+            white-space: pre-wrap;
+        }
+        .success {
+            color: #059669;
+        }
+        .info {
+            color: #2563eb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Clear ytFetch Auth Cookies</h1>
+        <p>Click the button below to clear all Supabase authentication cookies. This can help resolve OAuth state errors.</p>
+        
+        <button onclick="clearAuthCookies()">Clear All Auth Cookies</button>
+        
+        <div id="output" class="output" style="display: none;"></div>
+        
+        <h3>Instructions:</h3>
+        <ol>
+            <li>Open this file in your browser at: <code>http://192.168.1.103:3000/clear-auth-cookies.html</code></li>
+            <li>Click "Clear All Auth Cookies"</li>
+            <li>Try signing in again</li>
+        </ol>
+    </div>
+
+    <script>
+        function clearAuthCookies() {
+            const output = document.getElementById('output');
+            output.style.display = 'block';
+            output.innerHTML = '';
+            
+            // Get all cookies
+            const cookies = document.cookie.split('; ');
+            let clearedCount = 0;
+            
+            output.innerHTML += '<span class="info">Current cookies found:</span>\n';
+            cookies.forEach(cookie => {
+                if (cookie) {
+                    const [name] = cookie.split('=');
+                    output.innerHTML += `- ${name}\n`;
+                }
+            });
+            
+            output.innerHTML += '\n<span class="info">Clearing Supabase cookies...</span>\n';
+            
+            // Clear Supabase auth cookies
+            const cookieNames = [
+                'sb-access-token',
+                'sb-refresh-token',
+                'sb-auth-token',
+                'sb-code-verifier'
+            ];
+            
+            // Also check for cookies with the Supabase project ID
+            cookies.forEach(cookie => {
+                if (cookie) {
+                    const [name] = cookie.split('=');
+                    if (name.startsWith('sb-') || name.includes('supabase')) {
+                        cookieNames.push(name);
+                    }
+                }
+            });
+            
+            // Clear each cookie
+            const domains = ['192.168.1.103', 'localhost', ''];
+            const paths = ['/', '/auth', '/auth/callback'];
+            
+            cookieNames.forEach(name => {
+                domains.forEach(domain => {
+                    paths.forEach(path => {
+                        // Clear with various combinations
+                        document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=${path}${domain ? `; domain=${domain}` : ''}`;
+                        document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=${path}${domain ? `; domain=.${domain}` : ''}`;
+                    });
+                });
+                clearedCount++;
+            });
+            
+            output.innerHTML += `\n<span class="success">✓ Cleared ${clearedCount} cookies</span>\n`;
+            
+            // Clear localStorage items
+            output.innerHTML += '\n<span class="info">Clearing localStorage...</span>\n';
+            const keysToRemove = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (key && (key.includes('supabase') || key.includes('auth'))) {
+                    keysToRemove.push(key);
+                }
+            }
+            
+            keysToRemove.forEach(key => {
+                localStorage.removeItem(key);
+                output.innerHTML += `- Removed: ${key}\n`;
+            });
+            
+            output.innerHTML += `\n<span class="success">✓ Cleared ${keysToRemove.length} localStorage items</span>\n`;
+            
+            // Clear sessionStorage items
+            output.innerHTML += '\n<span class="info">Clearing sessionStorage...</span>\n';
+            const sessionKeysToRemove = [];
+            for (let i = 0; i < sessionStorage.length; i++) {
+                const key = sessionStorage.key(i);
+                if (key && (key.includes('supabase') || key.includes('auth'))) {
+                    sessionKeysToRemove.push(key);
+                }
+            }
+            
+            sessionKeysToRemove.forEach(key => {
+                sessionStorage.removeItem(key);
+                output.innerHTML += `- Removed: ${key}\n`;
+            });
+            
+            output.innerHTML += `\n<span class="success">✓ Cleared ${sessionKeysToRemove.length} sessionStorage items</span>\n`;
+            
+            output.innerHTML += '\n<span class="success">✅ All authentication data cleared!</span>\n';
+            output.innerHTML += '\nYou can now try signing in again.';
+        }
+    </script>
+</body>
+</html>

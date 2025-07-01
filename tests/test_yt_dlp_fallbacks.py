@@ -8,7 +8,7 @@ import os
 import sys
 import logging
 import yt_dlp
-from appStreamlit import get_video_id_from_url, get_video_info
+from misc.appStreamlit import get_video_id_from_url, get_video_info
 
 # Set up logging
 logging.basicConfig(

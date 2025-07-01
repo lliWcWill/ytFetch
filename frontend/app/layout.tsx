@@ -1,8 +1,13 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { AuthProvider } from "@/providers/AuthProvider";
+import { AuthSuccessHandler } from "@/components/AuthSuccessHandler";
+import { SidebarProvider } from "@/contexts/SidebarContext";
 import Header from "@/components/Header";
+import UserSidebar from "@/components/UserSidebar";
+import MainContent from "@/components/MainContent";
 import "./globals.css";
+import { Suspense } from "react";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -39,12 +44,18 @@ export default function RootLayout({
         suppressHydrationWarning
       >
         <AuthProvider>
-          <div className="flex flex-col min-h-screen">
-            <Header />
-            <main className="flex-1">
-              {children}
-            </main>
-          </div>
+          <SidebarProvider>
+            <Suspense fallback={null}>
+              <AuthSuccessHandler />
+            </Suspense>
+            <div className="flex flex-col min-h-screen">
+              <Header />
+              <UserSidebar />
+              <MainContent>
+                {children}
+              </MainContent>
+            </div>
+          </SidebarProvider>
         </AuthProvider>
       </body>
     </html>

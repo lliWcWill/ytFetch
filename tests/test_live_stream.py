@@ -6,7 +6,7 @@ Test script for YouTube live stream download functionality
 import os
 import sys
 import logging
-from appStreamlit import get_video_id_from_url, get_video_info, download_audio_as_mp3
+from misc.appStreamlit import get_video_id_from_url, get_video_info, download_audio_as_mp3
 
 # Set up logging
 logging.basicConfig(

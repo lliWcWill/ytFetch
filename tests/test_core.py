@@ -7,7 +7,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import functions to test
-from appStreamlit import (
+from misc.appStreamlit import (
     get_video_id_from_url,
     sanitize_filename,
     parse_iso8601_duration,

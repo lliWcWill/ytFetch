@@ -124,21 +124,50 @@ export function TranscriptViewer({
   const handleCopy = async () => {
     if (!transcript) return
     
+    // Check if we're in a secure context (HTTPS or localhost)
+    const isSecureContext = window.isSecureContext
+    
+    // Try modern clipboard API first if in secure context
+    if (isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(transcript)
+        setIsCopied(true)
+        setTimeout(() => setIsCopied(false), 2000)
+        return
+      } catch (error) {
+        console.warn('Clipboard API failed, falling back to legacy method:', error)
+      }
+    }
+    
+    // Fallback for non-secure contexts and older browsers
     try {
-      await navigator.clipboard.writeText(transcript)
-      setIsCopied(true)
-      setTimeout(() => setIsCopied(false), 2000)
-    } catch (error) {
-      console.error('Failed to copy to clipboard:', error)
-      // Fallback for older browsers
       const textArea = document.createElement('textarea')
       textArea.value = transcript
+      textArea.style.position = 'fixed'
+      textArea.style.top = '0'
+      textArea.style.left = '0'
+      textArea.style.width = '2em'
+      textArea.style.height = '2em'
+      textArea.style.padding = '0'
+      textArea.style.border = 'none'
+      textArea.style.outline = 'none'
+      textArea.style.boxShadow = 'none'
+      textArea.style.background = 'transparent'
       document.body.appendChild(textArea)
+      textArea.focus()
       textArea.select()
-      document.execCommand('copy')
+      
+      const successful = document.execCommand('copy')
       document.body.removeChild(textArea)
-      setIsCopied(true)
-      setTimeout(() => setIsCopied(false), 2000)
+      
+      if (successful) {
+        setIsCopied(true)
+        setTimeout(() => setIsCopied(false), 2000)
+      } else {
+        console.error('Failed to copy text using fallback method')
+      }
+    } catch (error) {
+      console.error('All copy methods failed:', error)
     }
   }
 

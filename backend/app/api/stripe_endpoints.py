@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from pydantic import BaseModel
 
 from ..core.auth import AuthenticatedUser, RequireAuth
-from ..core.stripe_config import STRIPE_PRICES, is_stripe_configured
+from ..core.stripe_config import STRIPE_TOKEN_PRICES, is_stripe_configured
 from ..services.stripe_service import StripeService
 
 logger = logging.getLogger(__name__)
@@ -269,7 +269,7 @@ async def get_pricing_tiers():
     """
     tiers = []
     
-    for tier_name, price_info in STRIPE_PRICES.items():
+    for package_id, package_info in STRIPE_TOKEN_PRICES.items():
         # Get tier limits from auth module
         from ..core.auth import TIER_LIMITS
         tier_limits = TIER_LIMITS.get(tier_name, {})

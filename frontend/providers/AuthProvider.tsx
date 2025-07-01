@@ -97,25 +97,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
     setAuthState(prev => ({ ...prev, error: null }))
   }, [])
 
-  // Fetch user profile with tier information
+  // Fetch user profile - currently we don't have a user_profiles table
+  // This is a placeholder for future implementation
   const fetchUserProfile = useCallback(async (userId: string): Promise<UserProfile | null> => {
-    try {
-      const { data: profile, error } = await supabase
-        .from('user_profiles')
-        .select('*')
-        .eq('id', userId)
-        .single()
-
-      if (error) {
-        console.error('Error fetching user profile:', error)
-        return null
-      }
-
-      return profile as UserProfile
-    } catch (error) {
-      console.error('Failed to fetch user profile:', error)
-      return null
-    }
+    // For now, return null as we don't have a user_profiles table
+    // Token balance is fetched separately through the API
+    return null
   }, [])
 
   // Handle auth state changes
@@ -137,17 +124,17 @@ export function AuthProvider({ children }: AuthProviderProps) {
       error: null
     }))
 
-    // Handle redirects based on auth events
+    // Log auth events but don't handle redirects here
+    // Redirects should be handled by the auth callback route
     switch (event) {
       case 'SIGNED_IN':
-        // Redirect to home or intended destination
-        const redirectTo = sessionStorage.getItem('auth-redirect-to') || '/'
-        sessionStorage.removeItem('auth-redirect-to')
-        router.push(redirectTo)
+        console.log('User signed in successfully')
+        // Force a re-render of components that depend on auth state
+        window.dispatchEvent(new Event('auth-state-changed'))
         break
       case 'SIGNED_OUT':
-        // Don't redirect on sign out - allow guest access
         console.log('User signed out - guest mode active')
+        window.dispatchEvent(new Event('auth-state-changed'))
         break
       case 'TOKEN_REFRESHED':
         console.log('Token refreshed successfully')
@@ -156,7 +143,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         console.log('User profile updated')
         break
     }
-  }, [router, fetchUserProfile])
+  }, [fetchUserProfile])
 
   // Initialize auth state and set up listener
   useEffect(() => {
@@ -165,6 +152,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // Get initial session
     const initializeAuth = async () => {
       try {
+        // Add a small delay to ensure Supabase client is fully initialized
+        await new Promise(resolve => setTimeout(resolve, 100))
+        
         const { data: { session }, error } = await supabase.auth.getSession()
         
         if (error) {
@@ -193,6 +183,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
             loading: false,
             error: null
           })
+          
+          // If we have a session, dispatch auth state changed event
+          if (session?.user) {
+            console.log('Initial session found, dispatching auth-state-changed')
+            window.dispatchEvent(new Event('auth-state-changed'))
+          }
         }
       } catch (error) {
         console.error('Auth initialization error:', error)
@@ -211,25 +207,52 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // Set up auth state listener
     const { data: { subscription } } = supabase.auth.onAuthStateChange(handleAuthChange)
 
+    // Refresh auth state when window regains focus or becomes visible
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        initializeAuth()
+      }
+    }
+
+    const handleFocus = () => {
+      initializeAuth()
+    }
+
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('focus', handleFocus)
+
     return () => {
       mounted = false
       subscription.unsubscribe()
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', handleFocus)
     }
-  }, [handleAuthChange, fetchUserProfile])
+  }, [handleAuthChange, fetchUserProfile, router])
 
   // Sign in with Google
   const signInWithGoogle = useCallback(async () => {
     clearError()
     
     try {
+      // Clear any existing auth state that might interfere
+      await supabase.auth.signOut({ scope: 'local' })
+      
+      // Small delay to ensure cleanup is complete
+      await new Promise(resolve => setTimeout(resolve, 100))
+      
       // Get the stored redirect path
       const storedRedirect = sessionStorage.getItem('auth-redirect-to')
       const redirectParam = storedRedirect ? `?next=${encodeURIComponent(storedRedirect)}` : ''
       
+      const redirectUrl = `${window.location.origin}/auth/callback${redirectParam}`
+      console.log('OAuth redirect URL:', redirectUrl)
+      console.log('Current origin:', window.location.origin)
+      
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: `${window.location.origin}/auth/callback${redirectParam}`,
+          redirectTo: redirectUrl,
           queryParams: {
             access_type: 'offline',
             prompt: 'consent',
@@ -288,6 +311,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
   // Refresh session
   const refreshSession = useCallback(async () => {
     try {
+      // First check if we have a session to refresh
+      const { data: { session: currentSession } } = await supabase.auth.getSession()
+      
+      if (!currentSession) {
+        console.log('No session to refresh')
+        return
+      }
+      
       const { data: { session }, error } = await supabase.auth.refreshSession()
       
       if (error) {
@@ -307,6 +338,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
           profile,
           error: null
         }))
+        
+        // Dispatch auth state changed event after successful refresh
+        console.log('Session refreshed, dispatching auth-state-changed')
+        window.dispatchEvent(new Event('auth-state-changed'))
       }
     } catch (error) {
       const errorMessage = `Session refresh error: ${error instanceof Error ? error.message : 'Unknown error'}`

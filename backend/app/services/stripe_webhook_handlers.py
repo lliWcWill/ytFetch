@@ -11,7 +11,7 @@ from datetime import datetime
 import stripe
 
 from ..core.supabase import SupabaseClient
-from ..core.stripe_config import get_tier_from_price_id, HANDLED_WEBHOOK_EVENTS
+from ..core.stripe_config import get_package_from_price_id, HANDLED_WEBHOOK_EVENTS
 
 logger = logging.getLogger(__name__)
 

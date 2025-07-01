@@ -100,6 +100,12 @@ class SupabaseClient:
             SupabaseError: If client creation fails
         """
         try:
+            settings = get_settings()
+            
+            # Log SSL configuration status
+            if settings.debug:
+                logger.info("Creating Supabase client in debug mode (SSL verification handled globally)")
+            
             options = ClientOptions(
                 auto_refresh_token=not is_service_role,  # Don't auto-refresh for service role
                 persist_session=not is_service_role,     # Don't persist session for service role

@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import the orchestrator function directly
 try:
-    from appStreamlit import get_transcript_with_fallback
+    from misc.appStreamlit import get_transcript_with_fallback
 except ImportError:
     print("❌ ERROR: Could not import get_transcript_with_fallback from appStreamlit")
     print("    Make sure appStreamlit.py exists and the function is defined")

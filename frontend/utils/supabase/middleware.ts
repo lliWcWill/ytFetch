@@ -10,6 +10,12 @@ export async function updateSession(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      auth: {
+        flowType: 'pkce',
+        autoRefreshToken: true,
+        persistSession: true,
+        detectSessionInUrl: true,
+      },
       cookies: {
         getAll() {
           return request.cookies.getAll()
@@ -19,9 +25,31 @@ export async function updateSession(request: NextRequest) {
           supabaseResponse = NextResponse.next({
             request
           })
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          )
+          
+          // Determine if we're in production or using HTTPS
+          const isProduction = process.env.NODE_ENV === 'production'
+          const url = request.url
+          const isSecure = url.startsWith('https://') || isProduction
+          
+          cookiesToSet.forEach(({ name, value, options }) => {
+            const cookieOptions = {
+              name,
+              value,
+              ...options,
+              path: '/',
+              sameSite: 'lax' as const,
+              secure: false, // Explicitly set to false for development
+              httpOnly: false, // Must be false for client-side access
+              maxAge: options?.maxAge || 60 * 60 * 24 * 7, // 7 days
+            }
+            
+            // Only enable secure in production or HTTPS environments
+            if (isSecure) {
+              cookieOptions.secure = true
+            }
+            
+            supabaseResponse.cookies.set(cookieOptions)
+          })
         }
       }
     }

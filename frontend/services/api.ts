@@ -126,6 +126,7 @@ export function generateClientId(): string {
  */
 export function getApiUrl(): string {
   const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+  console.log('API URL from env:', apiUrl); // Debug log
   if (!apiUrl) {
     console.warn('NEXT_PUBLIC_API_URL not set, using default localhost:8000');
     return 'http://localhost:8000';

@@ -32,10 +32,16 @@ class Settings(BaseSettings):
     stripe_publishable_key: Optional[str] = Field(None, description="Stripe publishable API key")
     stripe_webhook_secret: Optional[str] = Field(None, description="Stripe webhook secret")
     
+    # Stripe Price IDs
+    stripe_price_starter: Optional[str] = Field(None, description="Stripe price ID for starter package")
+    stripe_price_popular: Optional[str] = Field(None, description="Stripe price ID for popular package")
+    stripe_price_volume: Optional[str] = Field(None, description="Stripe price ID for volume package")
+    
     # Server Configuration
     debug: bool = Field(False, description="Enable debug mode")
     host: str = Field("0.0.0.0", description="Server host")
     port: int = Field(8000, description="Server port")
+    app_secret_key: Optional[str] = Field(None, description="Application secret key for hashing")
     
     # CORS Configuration
     cors_origins: List[str] = Field(
@@ -63,9 +69,6 @@ class Settings(BaseSettings):
     stripe_secret_key: Optional[str] = Field(None, description="Stripe secret API key")
     stripe_publishable_key: Optional[str] = Field(None, description="Stripe publishable key")
     stripe_webhook_secret: Optional[str] = Field(None, description="Stripe webhook endpoint secret")
-    stripe_price_free: Optional[str] = Field(None, description="Stripe price ID for free tier")
-    stripe_price_pro: Optional[str] = Field(None, description="Stripe price ID for pro tier")
-    stripe_price_enterprise: Optional[str] = Field(None, description="Stripe price ID for enterprise tier")
 
     class Config:
         env_file = ".env"

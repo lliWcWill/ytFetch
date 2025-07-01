@@ -16,8 +16,8 @@ from stripe.error import StripeError
 
 from ..core.stripe_config import (
     STRIPE_CONFIG, 
-    STRIPE_PRICES,
-    get_tier_from_price_id,
+    STRIPE_TOKEN_PRICES,
+    get_package_from_price_id,
     is_stripe_configured
 )
 from ..core.supabase import SupabaseClient
@@ -388,7 +388,7 @@ class StripeService:
             
             result = {
                 'tier': profile.get('tier', 'free'),
-                'tier_display_name': STRIPE_PRICES.get(profile.get('tier', 'free'), {}).get('display_name', 'Free'),
+                'tier_display_name': 'Token Based',
                 'stripe_customer_id': profile.get('stripe_customer_id'),
                 'stripe_subscription_id': profile.get('stripe_subscription_id'),
                 'subscription_status': profile.get('stripe_subscription_status'),

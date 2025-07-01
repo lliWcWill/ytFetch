@@ -58,6 +58,7 @@ export async function getUsage(): Promise<GuestUsageResponse> {
   const headers = await createAuthHeaders()
 
   try {
+    console.log('Fetching guest usage from:', `${apiUrl}/api/v1/guest/usage`); // Debug log
     const response = await fetch(`${apiUrl}/api/v1/guest/usage`, {
       method: 'GET',
       headers,
@@ -70,6 +71,7 @@ export async function getUsage(): Promise<GuestUsageResponse> {
     return await response.json()
   } catch (error) {
     console.error('Error getting usage:', error)
+    console.error('API URL was:', apiUrl) // Debug log
     // Return default guest usage on error
     return {
       is_guest: true,

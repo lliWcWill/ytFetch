@@ -12,7 +12,7 @@ import { cn } from '@/lib/utils'
 import { useAuth } from '@/providers/AuthProvider'
 
 interface TokenBalanceProps {
-  variant?: 'default' | 'compact' | 'inline'
+  variant?: 'default' | 'compact' | 'inline' | 'detailed'
   showBuyButton?: boolean
   className?: string
   onBalanceUpdate?: (balance: UserTokenBalance) => void
@@ -34,8 +34,22 @@ export function TokenBalance({
     if (user) {
       loadBalance()
     } else {
+      setBalance(null)
       setLoading(false)
     }
+  }, [user])
+
+  // Listen for auth state changes to refresh balance
+  useEffect(() => {
+    const handleAuthStateChange = () => {
+      console.log('Auth state changed, refreshing token balance')
+      if (user) {
+        loadBalance()
+      }
+    }
+
+    window.addEventListener('auth-state-changed', handleAuthStateChange)
+    return () => window.removeEventListener('auth-state-changed', handleAuthStateChange)
   }, [user])
 
   const loadBalance = async () => {
@@ -133,6 +147,60 @@ export function TokenBalance({
             </Button>
           )}
         </div>
+      </motion.div>
+    )
+  }
+
+  if (variant === 'detailed') {
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: -10 }}
+        animate={{ opacity: 1, y: 0 }}
+        className={cn("space-y-4", className)}
+      >
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-4xl font-bold text-zinc-100">
+              {tokenService.formatTokens(balance.balance)}
+            </p>
+            <p className="text-sm text-zinc-500">tokens available</p>
+          </div>
+          {isLowBalance && (
+            <Badge variant="secondary" className="bg-orange-500/10 text-orange-500 border border-orange-500/20">
+              Low balance
+            </Badge>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div className="bg-zinc-800/50 rounded-lg p-3">
+            <p className="text-xs text-zinc-500 mb-1">Lifetime Purchased</p>
+            <p className="text-lg font-semibold text-zinc-100">
+              {tokenService.formatTokens(balance.lifetimePurchased)}
+            </p>
+          </div>
+          <div className="bg-zinc-800/50 rounded-lg p-3">
+            <p className="text-xs text-zinc-500 mb-1">Lifetime Used</p>
+            <p className="text-lg font-semibold text-zinc-100">
+              {tokenService.formatTokens(balance.lifetimeUsed)}
+            </p>
+          </div>
+        </div>
+
+        {showBuyButton && (
+          <Button
+            onClick={() => router.push('/pricing')}
+            className={cn(
+              "w-full",
+              isLowBalance 
+                ? "bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 shadow-sm shadow-orange-500/20"
+                : ""
+            )}
+            variant={isLowBalance ? "default" : "outline"}
+          >
+            {isLowBalance ? "Buy more tokens" : "View token packages"}
+          </Button>
+        )}
       </motion.div>
     )
   }

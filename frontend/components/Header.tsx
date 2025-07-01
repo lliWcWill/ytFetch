@@ -29,7 +29,6 @@ const navigation: NavItem[] = [
   { href: '/', label: 'Transcribe' },
   { href: '/bulk', label: 'Bulk Process' },
   { href: '/pricing', label: 'Pricing' },
-  { href: '/dashboard', label: 'Dashboard', authRequired: true },
 ]
 
 export default function Header() {
@@ -39,6 +38,24 @@ export default function Header() {
   const [isProfileOpen, setIsProfileOpen] = useState(false)
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const profileRef = useRef<HTMLDivElement>(null)
+  
+  // Debug auth state
+  useEffect(() => {
+    console.log('Header auth state:', { user: user?.email, loading })
+  }, [user, loading])
+  
+  // Force re-render on auth state change
+  const [, forceUpdate] = useState({})
+  
+  useEffect(() => {
+    const handleAuthChange = () => {
+      console.log('Header: auth-state-changed event received')
+      forceUpdate({})
+    }
+    
+    window.addEventListener('auth-state-changed', handleAuthChange)
+    return () => window.removeEventListener('auth-state-changed', handleAuthChange)
+  }, [])
 
   // Close profile dropdown when clicking outside
   useEffect(() => {
@@ -56,6 +73,18 @@ export default function Header() {
   useEffect(() => {
     setIsMobileMenuOpen(false)
   }, [pathname])
+
+  // Listen for auth state changes to force re-render
+  useEffect(() => {
+    const handleAuthStateChange = () => {
+      console.log('Auth state changed, forcing re-render')
+      // Force a re-render by updating a local state
+      setIsProfileOpen(false)
+    }
+
+    window.addEventListener('auth-state-changed', handleAuthStateChange)
+    return () => window.removeEventListener('auth-state-changed', handleAuthStateChange)
+  }, [])
 
   const handleSignOut = async () => {
     try {
@@ -135,22 +164,11 @@ export default function Header() {
 
           {/* User Menu */}
           <div className="flex items-center space-x-4">
-            {/* Dashboard Button & Token Balance for authenticated users */}
+            {/* Token Balance for authenticated users (desktop only) */}
             {user && !loading && (
-              <>
-                <div className="hidden md:block">
-                  <TokenBalance variant="inline" showBuyButton={false} />
-                </div>
-                <Button
-                  onClick={() => router.push('/dashboard')}
-                  variant="outline"
-                  size="sm"
-                  className="hidden md:flex items-center gap-2 border-zinc-800 hover:bg-zinc-900 text-zinc-300 hover:text-zinc-100"
-                >
-                  <Coins className="w-4 h-4" />
-                  Dashboard
-                </Button>
-              </>
+              <div className="hidden md:block">
+                <TokenBalance variant="inline" showBuyButton={false} />
+              </div>
             )}
             
             {/* Auth Section */}
@@ -207,16 +225,6 @@ export default function Header() {
                         Settings
                       </button>
                       
-                      <button
-                        onClick={() => {
-                          setIsProfileOpen(false)
-                          router.push('/dashboard')
-                        }}
-                        className="flex w-full items-center px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
-                      >
-                        <Coins className="mr-2 h-4 w-4" />
-                        Token Dashboard
-                      </button>
                       
                       <div className="border-t border-zinc-800 my-1"></div>
                       
@@ -310,12 +318,6 @@ export default function Header() {
                     className="block px-3 py-2 text-base font-medium text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 rounded-md transition-colors"
                   >
                     Settings
-                  </Link>
-                  <Link
-                    href="/dashboard"
-                    className="block px-3 py-2 text-base font-medium text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 rounded-md transition-colors"
-                  >
-                    Token Dashboard
                   </Link>
                   <button
                     onClick={handleSignOut}

@@ -1,11 +1,71 @@
 'use client'
 
 import { Button } from '@/components/ui/button'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { AlertCircle } from 'lucide-react'
+import { Suspense } from 'react'
 
-export default function AuthCodeErrorPage() {
+function AuthErrorContent() {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  
+  const error = searchParams.get('error')
+  const description = searchParams.get('description')
+  const details = searchParams.get('details')
+
+  const getErrorInfo = () => {
+    switch (error) {
+      case 'state_mismatch':
+        return {
+          title: 'OAuth State Error',
+          message: 'There was a problem with the authentication state. This can happen if cookies are disabled or if there was a network issue during sign-in.',
+          suggestion: 'Please try signing in again and make sure cookies are enabled in your browser.'
+        }
+      case 'exchange_failed':
+        return {
+          title: 'Authentication Failed',
+          message: 'Failed to complete the sign-in process.',
+          suggestion: 'Please try signing in again. If the problem persists, check your internet connection.'
+        }
+      case 'unexpected':
+        return {
+          title: 'Unexpected Error',
+          message: 'An unexpected error occurred during authentication.',
+          suggestion: 'Please try again. If the problem continues, contact support.'
+        }
+      case 'no_code':
+        return {
+          title: 'Authentication Incomplete',
+          message: 'The authentication process was not completed properly.',
+          suggestion: 'Please try signing in again.'
+        }
+      default:
+        return {
+          title: 'Authentication Error',
+          message: description || 'There was an error during the authentication process. This could be due to an expired link or a configuration issue.',
+          suggestion: 'Please try signing in again.'
+        }
+    }
+  }
+
+  const errorInfo = getErrorInfo()
+
+  const handleRetry = () => {
+    // Clear any stored auth state that might be causing issues
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem('auth-redirect-to')
+      localStorage.removeItem('supabase.auth.token')
+      // Clear any Supabase auth cookies
+      document.cookie.split(";").forEach((c) => {
+        if (c.includes('sb-')) {
+          const eqPos = c.indexOf("=")
+          const name = eqPos > -1 ? c.substr(0, eqPos) : c
+          document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain=" + window.location.hostname
+        }
+      })
+    }
+    router.push('/')
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
@@ -15,15 +75,29 @@ export default function AuthCodeErrorPage() {
         </div>
         
         <div className="space-y-2">
-          <h1 className="text-2xl font-semibold">Authentication Error</h1>
+          <h1 className="text-2xl font-semibold">{errorInfo.title}</h1>
           <p className="text-muted-foreground">
-            There was an error during the authentication process. This could be due to an expired link or a configuration issue.
+            {errorInfo.message}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            {errorInfo.suggestion}
           </p>
         </div>
 
+        {details && (
+          <details className="text-left bg-muted/50 p-3 rounded-lg">
+            <summary className="cursor-pointer text-sm font-medium">
+              Technical Details
+            </summary>
+            <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto whitespace-pre-wrap">
+              {details}
+            </pre>
+          </details>
+        )}
+
         <div className="space-y-3">
           <Button 
-            onClick={() => router.push('/login')}
+            onClick={handleRetry}
             size="lg"
             className="w-full"
           >
@@ -45,5 +119,17 @@ export default function AuthCodeErrorPage() {
         </p>
       </div>
     </div>
+  )
+}
+
+export default function AuthCodeErrorPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-500"></div>
+      </div>
+    }>
+      <AuthErrorContent />
+    </Suspense>
   )
 }

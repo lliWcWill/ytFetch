@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Header
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
@@ -8,6 +8,7 @@ import logging
 from app.core.auth import get_current_user, AuthenticatedUser
 from app.core.supabase import get_supabase_anon, get_supabase_service
 from app.core.stripe_config import STRIPE_CONFIG
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -48,26 +49,25 @@ class PurchaseResponse(BaseModel):
     checkout_url: str
     session_id: str
 
-# Token packages configuration
-# For testing, use Stripe test price IDs - replace with your actual price IDs from Stripe Dashboard
+# Token packages configuration - reads from environment variables
 TOKEN_PACKAGES = {
     "starter": {
         "id": "starter",
         "tokens": 50,
         "price": 2.99,
-        "stripe_price_id": "price_1Rf5JGBDd5XvmPbiSFKHjaOE"  # Test price ID - replace with actual
+        "stripe_price_id": getattr(settings, 'stripe_price_starter', 'price_1RfwhoB41NqsKnOjy1dZFKoD')
     },
     "popular": {
         "id": "popular",
-        "tokens": 250,  # Updated to match frontend
+        "tokens": 150,
         "price": 6.99,
-        "stripe_price_id": "price_1Rf4gpBDd5XvmPbiXDq77Xhq"  # Test price ID - replace with actual
+        "stripe_price_id": getattr(settings, 'stripe_price_popular', 'price_1RfwhyB41NqsKnOjIcncY68A')
     },
     "volume": {
         "id": "volume",
-        "tokens": 1000,  # Updated to match frontend  
+        "tokens": 500,
         "price": 17.99,
-        "stripe_price_id": "price_1Rf5NNBDd5XvmPbisqDUKRq4"  # Test price ID - replace with actual
+        "stripe_price_id": getattr(settings, 'stripe_price_volume', 'price_1Rfwi9B41NqsKnOjv36fLwNI')
     }
 }
 
@@ -273,8 +273,62 @@ async def use_tokens(
         raise HTTPException(status_code=500, detail="Failed to use tokens")
 
 @router.post("/webhook/stripe")
-async def stripe_webhook(request: dict):
+async def stripe_webhook(request: Request, stripe_signature: str = Header(None, alias="stripe-signature")):
     """Handle Stripe webhook for successful token purchases"""
-    # This would be implemented to handle Stripe webhooks
-    # For now, we'll handle it in the existing stripe_webhook_handlers
-    pass
+    import json
+    from app.core.stripe_config import STRIPE_CONFIG
+    
+    if not stripe_signature:
+        raise HTTPException(status_code=400, detail="No stripe-signature header")
+    
+    try:
+        # Get raw body
+        payload = await request.body()
+        
+        # For development/testing, skip signature verification if webhook secret is placeholder
+        if STRIPE_CONFIG["webhook_secret"] == "whsec_test_secret_for_development":
+            logger.warning("Using development mode - skipping webhook signature verification")
+            event = json.loads(payload)
+        else:
+            # Verify webhook signature
+            event = stripe.Webhook.construct_event(
+                payload, stripe_signature, STRIPE_CONFIG["webhook_secret"]
+            )
+        
+        # Handle checkout.session.completed event
+        if event['type'] == 'checkout.session.completed':
+            session = event['data']['object']
+            
+            # Check if this is a token purchase
+            if 'tokens' in session.get('metadata', {}):
+                user_id = session['metadata']['user_id']
+                tokens = int(session['metadata']['tokens'])
+                package_id = session['metadata']['package_id']
+                amount_paid = session.get('amount_total', 0) / 100  # Convert from cents
+                
+                # Use Supabase function to process the purchase
+                supabase = get_supabase_service()
+                result = supabase.rpc('process_token_purchase', {
+                    'p_user_id': user_id,
+                    'p_tokens': tokens,
+                    'p_package_id': package_id,
+                    'p_stripe_session_id': session['id'],
+                    'p_amount_paid': amount_paid
+                }).execute()
+                
+                if result.data and result.data.get('success'):
+                    logger.info(f"Successfully processed token purchase for user {user_id}: {tokens} tokens")
+                    return {"status": "success", "tokens_added": tokens}
+                else:
+                    logger.error(f"Failed to process token purchase: {result.data}")
+                    return {"status": "error", "error": result.data.get('error')}
+        
+        return {"status": "success", "event_type": event['type']}
+        
+    except stripe.error.SignatureVerificationError as e:
+        logger.error(f"Invalid webhook signature: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    except Exception as e:
+        logger.error(f"Webhook processing error: {e}")
+        # Return 200 to prevent Stripe from retrying
+        return {"status": "error", "error": str(e)}

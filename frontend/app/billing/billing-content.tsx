@@ -1,72 +1,41 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
-import { ArrowLeft, CreditCard, Check, Loader2, Settings } from 'lucide-react'
-import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { useAuth } from '@/providers/AuthProvider'
-import { StripeService, CustomerInfo } from '@/services/stripeService'
-import { ApiValidationError } from '@/services/api'
+import { Card } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { TokenBalance } from '@/components/TokenBalance'
+import { 
+  CreditCard, 
+  Coins, 
+  Package,
+  Clock,
+  CheckCircle2
+} from 'lucide-react'
+import { TOKEN_PACKAGES } from '@/types/tokens'
+import { tokenService } from '@/services/tokenService'
 
 export default function BillingContent() {
+  const { user, loading } = useAuth()
   const router = useRouter()
-  const searchParams = useSearchParams()
-  const { user, loading, profile } = useAuth()
-  
-  // Redirect to dashboard as we're using token-based system now
-  useEffect(() => {
-    router.push('/dashboard')
-  }, [])
-  
-  const selectedTier = searchParams.get('tier') || 'pro'
-  const reason = searchParams.get('reason')
-  const canceled = searchParams.get('canceled') === 'true'
-  
-  const [isUpgrading, setIsUpgrading] = useState(false)
-  const [isLoadingPortal, setIsLoadingPortal] = useState(false)
-  const [customerInfo, setCustomerInfo] = useState<CustomerInfo | null>(null)
-  const [customerLoading, setCustomerLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState<string | null>(null)
 
   useEffect(() => {
     if (!loading && !user) {
-      sessionStorage.setItem('auth-redirect-to', '/billing')
       router.push('/login')
     }
   }, [user, loading, router])
-  
-  // Fetch customer info when user is loaded
-  useEffect(() => {
-    if (user && !loading) {
-      StripeService.getCustomerInfo()
-        .then(setCustomerInfo)
-        .catch(err => {
-          console.error('Failed to load customer info:', err)
-        })
-        .finally(() => setCustomerLoading(false))
-    }
-  }, [user, loading])
-  
-  // Show canceled message if user canceled checkout
-  useEffect(() => {
-    if (canceled) {
-      setError('Checkout was canceled. You can try again whenever you\'re ready.')
-      // Remove canceled param from URL
-      const url = new URL(window.location.href)
-      url.searchParams.delete('canceled')
-      window.history.replaceState({}, '', url)
-    }
-  }, [canceled])
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="flex flex-col items-center space-y-4">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500"></div>
-          <p className="text-sm text-muted-foreground">Loading...</p>
+      <div className="container mx-auto px-4 py-8">
+        <div className="animate-pulse">
+          <div className="h-8 bg-muted rounded w-1/3 mb-8"></div>
+          <div className="grid gap-4">
+            <div className="h-32 bg-muted rounded"></div>
+            <div className="h-48 bg-muted rounded"></div>
+          </div>
         </div>
       </div>
     )
@@ -76,251 +45,134 @@ export default function BillingContent() {
     return null
   }
 
-  const handleUpgrade = async (tier: 'pro' | 'enterprise') => {
-    setIsUpgrading(true)
-    setError(null)
+  const handlePurchase = async (packageId: string) => {
+    console.log('Starting purchase for package:', packageId)
+    setIsLoading(packageId)
     
     try {
-      await StripeService.upgradeToTier(tier)
-      // Redirect happens automatically via Stripe
-    } catch (err) {
-      if (err instanceof ApiValidationError) {
-        setError(err.message)
-      } else {
-        setError('Failed to start checkout. Please try again.')
-      }
-      console.error('Upgrade error:', err)
+      const result = await tokenService.purchaseTokens(packageId)
+      console.log('Purchase result:', result)
+    } catch (error) {
+      console.error('Failed to start checkout:', error)
+      // Show error to user
+      alert(`Error: ${error instanceof Error ? error.message : 'Failed to start checkout'}`)
     } finally {
-      setIsUpgrading(false)
+      setIsLoading(null)
     }
   }
-  
-  const handleManageSubscription = async () => {
-    setIsLoadingPortal(true)
-    setError(null)
-    
-    try {
-      await StripeService.redirectToCustomerPortal()
-    } catch (err) {
-      setError('Failed to open billing portal. Please try again.')
-      console.error('Portal error:', err)
-    } finally {
-      setIsLoadingPortal(false)
-    }
-  }
-  
-  const currentTier = profile?.tier || 'free'
-  const isSubscribed = currentTier !== 'free'
 
   return (
-    <div className="container mx-auto px-4 py-16 max-w-4xl">
-      <div className="mb-8">
-        <Link href="/settings">
-          <Button variant="ghost" size="sm" className="mb-4">
-            <ArrowLeft className="w-4 h-4 mr-2" />
-            Back to Settings
-          </Button>
-        </Link>
-        
-        <h1 className="text-4xl font-bold mb-2">Billing & Subscription</h1>
-        <p className="text-lg text-muted-foreground">
-          Manage your subscription and billing details
-        </p>
-      </div>
+    <div className="container mx-auto px-4 py-8">
+      <div className="max-w-4xl mx-auto">
+        <h1 className="text-3xl font-bold text-zinc-100 mb-8">Billing & Tokens</h1>
 
-      {error && (
-        <Card className="mb-6 border-destructive">
-          <CardContent className="pt-6">
-            <p className="text-sm text-destructive">{error}</p>
-          </CardContent>
-        </Card>
-      )}
-
-      {reason && (
-        <Card className="mb-6 bg-muted">
-          <CardContent className="pt-6">
-            <p className="text-sm">
-              {reason === 'limit' && 'You\'ve reached your plan limits. Upgrade to continue using all features.'}
-              {reason === 'feature' && 'This feature requires a paid subscription.'}
-            </p>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Current Plan */}
-      <Card className="mb-6">
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle>Current Plan</CardTitle>
-            {isSubscribed && customerInfo && (
-              <Button
-                onClick={handleManageSubscription}
-                variant="outline"
-                size="sm"
-                disabled={isLoadingPortal}
-              >
-                {isLoadingPortal ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <>
-                    <Settings className="w-4 h-4 mr-2" />
-                    Manage Billing
-                  </>
-                )}
-              </Button>
-            )}
-          </div>
-        </CardHeader>
-        <CardContent>
+        {/* Current Balance Card */}
+        <Card className="p-6 mb-8 bg-zinc-900 border-zinc-800">
           <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="text-2xl font-semibold capitalize">
-                {currentTier} {currentTier !== 'free' && 'Plan'}
-              </h3>
-              <p className="text-muted-foreground">
-                {currentTier === 'free' && 'Basic features with limited usage'}
-                {currentTier === 'pro' && 'Advanced features for professionals'}
-                {currentTier === 'enterprise' && 'Unlimited access for teams'}
-              </p>
-            </div>
-            <Badge variant={currentTier === 'free' ? 'secondary' : 'default'} className="text-lg px-3 py-1">
-              {currentTier === 'free' ? 'Free' : 'Active'}
-            </Badge>
+            <h2 className="text-xl font-semibold text-zinc-100">Current Balance</h2>
+            <Coins className="h-6 w-6 text-orange-500" />
           </div>
-          
-          {customerInfo && customerInfo.subscription && (
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Billing period</span>
-                <span>{customerInfo.subscription.interval === 'month' ? 'Monthly' : 'Yearly'}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">Next billing date</span>
-                <span>{new Date(customerInfo.subscription.current_period_end * 1000).toLocaleDateString()}</span>
-              </div>
-              {customerInfo.subscription.cancel_at_period_end && (
-                <div className="flex justify-between text-destructive">
-                  <span>Cancels on</span>
-                  <span>{new Date(customerInfo.subscription.current_period_end * 1000).toLocaleDateString()}</span>
-                </div>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+          <TokenBalance variant="detailed" showBuyButton={false} />
+        </Card>
 
-      {/* Available Plans */}
-      {currentTier !== 'enterprise' && (
-        <div className="space-y-6">
-          <h2 className="text-2xl font-semibold">Available Plans</h2>
-          
-          <div className="grid gap-6 md:grid-cols-2">
-            {/* Pro Plan */}
-            {currentTier !== 'pro' && (
-              <Card className={selectedTier === 'pro' ? 'ring-2 ring-primary' : ''}>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-xl">Pro</CardTitle>
-                    <Badge>Popular</Badge>
+        {/* Token Packages */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-semibold text-zinc-100 mb-6">Buy Token Packages</h2>
+          <div className="grid md:grid-cols-3 gap-4">
+            {TOKEN_PACKAGES.map((pkg) => (
+              <Card 
+                key={pkg.id}
+                className={`
+                  p-6 bg-zinc-900 border-zinc-800 relative
+                  ${pkg.popular ? 'ring-2 ring-orange-500' : ''}
+                `}
+              >
+                {pkg.popular && (
+                  <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
+                    <span className="bg-orange-500 text-white text-xs px-3 py-1 rounded-full">
+                      Most Popular
+                    </span>
                   </div>
-                  <CardDescription>Perfect for professionals</CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="mb-6">
-                    <span className="text-3xl font-bold">$19</span>
-                    <span className="text-muted-foreground">/month</span>
+                )}
+                <div className="text-center mb-4">
+                  <h3 className="text-lg font-semibold text-zinc-100 mb-2">{pkg.displayName}</h3>
+                  <div className="text-3xl font-bold text-zinc-100 mb-1">
+                    {tokenService.formatTokens(pkg.tokens)}
+                    <span className="text-sm font-normal text-zinc-400 ml-1">tokens</span>
                   </div>
-                  
-                  <ul className="space-y-2 mb-6">
-                    <li className="flex items-center">
-                      <Check className="w-4 h-4 mr-2 text-green-500" />
-                      <span className="text-sm">10,000 transcription minutes/month</span>
-                    </li>
-                    <li className="flex items-center">
-                      <Check className="w-4 h-4 mr-2 text-green-500" />
-                      <span className="text-sm">Advanced AI models</span>
-                    </li>
-                    <li className="flex items-center">
-                      <Check className="w-4 h-4 mr-2 text-green-500" />
-                      <span className="text-sm">Priority processing</span>
-                    </li>
-                    <li className="flex items-center">
-                      <Check className="w-4 h-4 mr-2 text-green-500" />
-                      <span className="text-sm">Export in all formats</span>
-                    </li>
-                  </ul>
-                  
-                  <Button 
-                    className="w-full" 
-                    onClick={() => handleUpgrade('pro')}
-                    disabled={isUpgrading || currentTier === 'pro'}
-                  >
-                    {isUpgrading ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <>
-                        <CreditCard className="w-4 h-4 mr-2" />
-                        {currentTier === 'pro' ? 'Current Plan' : 'Upgrade to Pro'}
-                      </>
-                    )}
-                  </Button>
-                </CardContent>
-              </Card>
-            )}
-            
-            {/* Enterprise Plan */}
-            <Card className={selectedTier === 'enterprise' ? 'ring-2 ring-primary' : ''}>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-xl">Enterprise</CardTitle>
-                  <Badge variant="secondary">Best Value</Badge>
+                  <div className="text-2xl font-semibold text-orange-500">{pkg.priceDisplay}</div>
+                  {pkg.savings && (
+                    <div className="text-sm text-green-500 mt-1">{pkg.savings}</div>
+                  )}
                 </div>
-                <CardDescription>For teams and power users</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="mb-6">
-                  <span className="text-3xl font-bold">$99</span>
-                  <span className="text-muted-foreground">/month</span>
-                </div>
-                
-                <ul className="space-y-2 mb-6">
-                  <li className="flex items-center">
-                    <Check className="w-4 h-4 mr-2 text-green-500" />
-                    <span className="text-sm">Unlimited transcriptions</span>
-                  </li>
-                  <li className="flex items-center">
-                    <Check className="w-4 h-4 mr-2 text-green-500" />
-                    <span className="text-sm">All AI models included</span>
-                  </li>
-                  <li className="flex items-center">
-                    <Check className="w-4 h-4 mr-2 text-green-500" />
-                    <span className="text-sm">Real-time processing</span>
-                  </li>
-                  <li className="flex items-center">
-                    <Check className="w-4 h-4 mr-2 text-green-500" />
-                    <span className="text-sm">API access & integrations</span>
-                  </li>
-                </ul>
-                
+                <p className="text-sm text-zinc-400 mb-4 text-center">{pkg.description}</p>
                 <Button 
-                  className="w-full" 
-                  onClick={() => handleUpgrade('enterprise')}
-                  disabled={isUpgrading}
+                  className="w-full bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700"
+                  onClick={() => handlePurchase(pkg.id)}
+                  disabled={isLoading === pkg.id}
                 >
-                  {isUpgrading ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                  {isLoading === pkg.id ? (
+                    <span className="flex items-center gap-2">
+                      <div className="w-4 h-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                      Loading...
+                    </span>
                   ) : (
                     <>
-                      <CreditCard className="w-4 h-4 mr-2" />
-                      Upgrade to Enterprise
+                      <Package className="mr-2 h-4 w-4" />
+                      Buy Now
                     </>
                   )}
                 </Button>
-              </CardContent>
-            </Card>
+              </Card>
+            ))}
           </div>
         </div>
-      )}
+
+        {/* Usage History */}
+        <Card className="p-6 bg-zinc-900 border-zinc-800">
+          <h2 className="text-xl font-semibold text-zinc-100 mb-4">Recent Activity</h2>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between p-3 bg-zinc-800/50 rounded-lg">
+              <div className="flex items-center gap-3">
+                <CheckCircle2 className="h-5 w-5 text-green-500" />
+                <div>
+                  <p className="text-sm font-medium text-zinc-100">Video Transcription</p>
+                  <p className="text-xs text-zinc-500">2 minutes ago</p>
+                </div>
+              </div>
+              <div className="text-sm text-zinc-400">-1 token</div>
+            </div>
+            <div className="flex items-center justify-between p-3 bg-zinc-800/50 rounded-lg">
+              <div className="flex items-center gap-3">
+                <CreditCard className="h-5 w-5 text-blue-500" />
+                <div>
+                  <p className="text-sm font-medium text-zinc-100">Token Purchase</p>
+                  <p className="text-xs text-zinc-500">1 hour ago</p>
+                </div>
+              </div>
+              <div className="text-sm text-green-500">+500 tokens</div>
+            </div>
+            <div className="flex items-center justify-between p-3 bg-zinc-800/50 rounded-lg">
+              <div className="flex items-center gap-3">
+                <CheckCircle2 className="h-5 w-5 text-green-500" />
+                <div>
+                  <p className="text-sm font-medium text-zinc-100">Bulk Transcription</p>
+                  <p className="text-xs text-zinc-500">3 hours ago</p>
+                </div>
+              </div>
+              <div className="text-sm text-zinc-400">-25 tokens</div>
+            </div>
+          </div>
+          <Button 
+            variant="outline" 
+            className="w-full mt-4 border-zinc-800"
+            onClick={() => router.push('/dashboard')}
+          >
+            <Clock className="mr-2 h-4 w-4" />
+            View Full History
+          </Button>
+        </Card>
+      </div>
     </div>
   )
 }

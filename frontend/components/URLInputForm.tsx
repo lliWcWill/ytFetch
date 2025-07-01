@@ -48,6 +48,44 @@ function ClientOnlySelect({ value, onValueChange, disabled }: {
   )
 }
 
+// Client-only wrapper for Groq model select
+function ClientOnlyGroqSelect({ value, onValueChange, disabled }: {
+  value: string
+  onValueChange: (value: string) => void
+  disabled?: boolean
+}) {
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+
+  if (!mounted) {
+    // Return a simple div that matches the Select's appearance during SSR
+    return (
+      <div className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground">
+        <span>Whisper Large v3 Turbo (Fastest)</span>
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 opacity-50">
+          <path d="m4.93179 5.43179 2.86768 2.86768a.5.5 0 0 0 .70711 0l2.86767-2.86768a.5.5 0 1 1 .70711.70711L7.85355 9.85355a.5.5 0 0 1-.70711 0L3.43168 6.13889a.5.5 0 0 1 .70711-.70711Z" fill="currentColor" fillRule="evenodd" clipRule="evenodd"></path>
+        </svg>
+      </div>
+    )
+  }
+
+  return (
+    <Select value={value} onValueChange={onValueChange}>
+      <SelectTrigger disabled={disabled}>
+        <SelectValue placeholder="Select Groq model" />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="whisper-large-v3-turbo">Whisper Large v3 Turbo (Fastest)</SelectItem>
+        <SelectItem value="whisper-large-v3">Whisper Large v3 (Standard)</SelectItem>
+        <SelectItem value="distil-whisper-large-v3-en">Distil Whisper v3 (English Only)</SelectItem>
+      </SelectContent>
+    </Select>
+  )
+}
+
 interface URLInputFormProps {
   onSubmit: (url: string, format: 'txt' | 'srt' | 'vtt' | 'json', method: 'unofficial' | 'groq', groqModel?: string) => void
   disabled?: boolean
@@ -178,16 +216,11 @@ export function URLInputForm({ onSubmit, disabled, processingMethod, onReset, sh
             <label htmlFor="groq-model" className="text-sm font-medium text-foreground">
               Groq Model
             </label>
-            <Select value={groqModel} onValueChange={setGroqModel}>
-              <SelectTrigger disabled={disabled}>
-                <SelectValue placeholder="Select Groq model" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="whisper-large-v3-turbo">Whisper Large v3 Turbo (Fastest)</SelectItem>
-                <SelectItem value="whisper-large-v3">Whisper Large v3 (Standard)</SelectItem>
-                <SelectItem value="distil-whisper-large-v3-en">Distil Whisper v3 (English Only)</SelectItem>
-              </SelectContent>
-            </Select>
+            <ClientOnlyGroqSelect 
+              value={groqModel} 
+              onValueChange={setGroqModel}
+              disabled={disabled}
+            />
           </div>
         </div>
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, Suspense } from 'react'
 import { motion } from 'framer-motion'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -16,7 +16,7 @@ import {
   Gift
 } from 'lucide-react'
 import { useAuth } from '@/providers/AuthProvider'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { FAQ } from '@/components/FAQ'
 import { TOKEN_PACKAGES } from '@/types/tokens'
@@ -86,10 +86,11 @@ const billingFaqItems = [
   }
 ]
 
-export default function PricingPage() {
+function PricingContent() {
   const { user } = useAuth()
   const router = useRouter()
   const [isLoading, setIsLoading] = useState<string | null>(null)
+  const searchParams = useSearchParams()
 
   const handleSelectPlan = async (tier: PricingTier) => {
     setIsLoading(tier.id)
@@ -108,6 +109,27 @@ export default function PricingPage() {
     
     setIsLoading(null)
   }
+
+  // Check if we should auto-trigger checkout after auth
+  useEffect(() => {
+    const packageId = searchParams.get('package')
+    const authSuccess = searchParams.get('auth_success')
+    
+    if (user && packageId && authSuccess === '1') {
+      // User just authenticated and has a package to purchase
+      const tier = tiers.find(t => t.id === packageId)
+      if (tier) {
+        // Clear the auth_success param to prevent re-triggering
+        const url = new URL(window.location.href)
+        url.searchParams.delete('auth_success')
+        url.searchParams.delete('package')
+        window.history.replaceState(null, '', url.toString())
+        
+        // Auto-trigger the checkout
+        handleSelectPlan(tier)
+      }
+    }
+  }, [user, searchParams])
 
   return (
     <div className="min-h-screen bg-zinc-950">
@@ -381,5 +403,20 @@ export default function PricingPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+export default function PricingPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-zinc-950">
+        <div className="flex flex-col items-center space-y-4">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-orange-500"></div>
+          <p className="text-sm text-zinc-400">Loading pricing...</p>
+        </div>
+      </div>
+    }>
+      <PricingContent />
+    </Suspense>
   )
 }

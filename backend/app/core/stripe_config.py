@@ -30,47 +30,33 @@ STRIPE_CONFIG = {
     "return_url": os.getenv("STRIPE_RETURN_URL", "http://localhost:3000/billing"),
 }
 
-# Price lookup keys and IDs (to be set in environment)
-STRIPE_PRICES = {
-    "free": {
-        "lookup_key": "free_tier",
-        "price_id": os.getenv("STRIPE_PRICE_FREE", ""),
-        "display_name": "Free",
-        "price_monthly": 0,
-        "price_yearly": 0,
+# Token package price IDs (from environment)
+STRIPE_TOKEN_PRICES = {
+    "starter": {
+        "price_id": settings.stripe_price_starter,
+        "display_name": "Starter Pack",
+        "tokens": 50,
+        "price": 2.99,
     },
-    "pro": {
-        "lookup_key": "pro_tier",
-        "price_id": os.getenv("STRIPE_PRICE_PRO", ""),
-        "display_name": "Pro",
-        "price_monthly": 19,
-        "price_yearly": 190,
+    "popular": {
+        "price_id": settings.stripe_price_popular,
+        "display_name": "Popular Pack",
+        "tokens": 150,
+        "price": 6.99,
     },
-    "enterprise": {
-        "lookup_key": "enterprise_tier", 
-        "price_id": os.getenv("STRIPE_PRICE_ENTERPRISE", ""),
-        "display_name": "Enterprise",
-        "price_monthly": 99,
-        "price_yearly": 990,
+    "volume": {
+        "price_id": settings.stripe_price_volume,
+        "display_name": "High Volume",
+        "tokens": 500,
+        "price": 17.99,
     }
 }
 
-# Product IDs (optional, for reference)
-STRIPE_PRODUCTS = {
-    "free": os.getenv("STRIPE_PRODUCT_FREE", ""),
-    "pro": os.getenv("STRIPE_PRODUCT_PRO", ""),
-    "enterprise": os.getenv("STRIPE_PRODUCT_ENTERPRISE", ""),
-}
-
-# Webhook event types we handle
+# Webhook event types we handle (one-time payments only)
 HANDLED_WEBHOOK_EVENTS = [
     "checkout.session.completed",
-    "customer.subscription.created",
-    "customer.subscription.updated", 
-    "customer.subscription.deleted",
-    "invoice.payment_succeeded",
-    "invoice.payment_failed",
-    "customer.subscription.trial_will_end",
+    "payment_intent.succeeded",
+    "payment_intent.payment_failed",
 ]
 
 
@@ -79,22 +65,14 @@ def is_stripe_configured() -> bool:
     return bool(STRIPE_CONFIG["secret_key"] and STRIPE_CONFIG["publishable_key"])
 
 
-def get_price_for_tier(tier: str) -> Optional[Dict[str, any]]:
-    """Get Stripe price information for a given tier."""
-    return STRIPE_PRICES.get(tier)
+def get_token_package_info(package_id: str) -> Optional[Dict[str, any]]:
+    """Get Stripe price information for a given token package."""
+    return STRIPE_TOKEN_PRICES.get(package_id)
 
 
-def get_tier_from_price_id(price_id: str) -> Optional[str]:
-    """Get tier name from a Stripe price ID."""
-    for tier, price_info in STRIPE_PRICES.items():
-        if price_info["price_id"] == price_id:
-            return tier
-    return None
-
-
-def get_tier_from_lookup_key(lookup_key: str) -> Optional[str]:
-    """Get tier name from a Stripe price lookup key."""
-    for tier, price_info in STRIPE_PRICES.items():
-        if price_info["lookup_key"] == lookup_key:
-            return tier
+def get_package_from_price_id(price_id: str) -> Optional[str]:
+    """Get package name from a Stripe price ID."""
+    for package_id, package_info in STRIPE_TOKEN_PRICES.items():
+        if package_info["price_id"] == price_id:
+            return package_id
     return None
